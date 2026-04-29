@@ -1,0 +1,2 @@
+# Stdlib only (urllib, json, subprocess, pathlib).
+# Pin future deps here if added.
