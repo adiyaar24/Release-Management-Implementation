@@ -1,0 +1,37 @@
+pipeline:
+  name: Push Drone Plugin
+  identifier: Push_Drone_Plugin
+  projectIdentifier: <+project.identifier>
+  orgIdentifier: <+org.identifier>
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        repoName: <+input>
+        build: <+input>
+  stages:
+    - stage:
+        name: Drone Plugin Push
+        identifier: Drone_Plugin_Push
+        description: ""
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: BuildAndPushDockerRegistry
+                  name: BuildAndPushDockerRegistry
+                  identifier: BuildAndPushDockerRegistry
+                  spec:
+                    repo: <+input>
+                    tags:
+                      - <+input>
+                    caching: true
+                    registryRef: <+input>
