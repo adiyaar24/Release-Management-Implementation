@@ -1,0 +1,110 @@
+process:
+  name: Multi-Persona Release Management Process
+  description: A comprehensive release management workflow supporting Release Manager, Developer, Performance Engineer, and QA Engineer personas with parallel approvals, configuration override capabilities, sequential environment deployments, and environment-specific configuration tracking for Day-2 operations.
+  id: multi_persona_release_mgmt_process
+  phases:
+    - phase:
+        activities:
+          - activity: Validate_SNOW_Change
+            id: Validate_SNOW_Change
+            name: Validate SNOW Change
+            description: Runs Custom pipeline that calls ServiceNow REST and sets activity outputs.
+            depends-on: []
+          - activity: Release_Manager_confirm_window_and_stakeholders
+            id: Release_Manager_confirm_window_and_stakeholders
+            name: Release Manager confirm window and stakeholders
+            description: "Manual checkpoint: RM confirms scheduled window, CAB / risk, and linkage to change ticket. Capture any free-text notes for audit."
+            depends-on:
+              - Validate_SNOW_Change
+        depends-on: []
+        description: "Release Manager initiates the release by providing Change Ticket ID from ServiceNow and scheduled release date. This phase establishes the release context and creates the release record. Includes placeholder for ServiceNow integration to validate and link the change ticket. Failure handling: If change ticket validation fails, notify Release Manager and halt process."
+        id: release_initiation_phase
+        name: Release Initiation
+        owners:
+          - Release_Managers
+    - phase:
+        activities:
+          - activity: Deploy_Service
+            id: Deploy_Service
+            name: Deploy Service
+            description: ""
+            depends-on: []
+        depends-on:
+          - release_initiation_phase
+        description: "Developer selects and stages services for the release from their assigned project. For each service, Developer provides configuration including Image Tag, CPU, and Memory as Harness service variables. System retrieves and prefills configuration from the most recent successful deployment for the same service and target environment (environment-specific retrieval). Developer can modify prefilled values or accept defaults. Supports service exclusion capability. Failure handling: If configuration retrieval fails, allow manual entry with warning notification."
+        id: service_staging_phase
+        name: Service Staging
+        owners:
+          - Developers
+    - phase:
+        activities:
+          - activity: Approvals
+            id: Approvals
+            name: Approvals
+            description: ""
+            depends-on: []
+        depends-on:
+          - service_staging_phase
+        description: "Performance Engineer and QA Engineer review staged services and configurations in parallel. Both approvers can approve, reject, or modify service configuration values (Image Tag, CPU, Memory). Configuration overrides are captured and applied to the deployment. Both approvals must be obtained before proceeding. Approvers can request changes which returns to Developer for modification. Failure handling: If either approver rejects, notify all stakeholders and return to service staging phase for corrections."
+        id: parallel_approval_phase
+        name: Parallel Approval - Performance and QA Review
+        owners:
+          - Performance_Engineer
+          - QA_Approvers
+    - phase:
+        activities:
+          - activity: Approvals
+            id: Approvals
+            name: Approvals
+            description: ""
+            depends-on: []
+        depends-on:
+          - parallel_approval_phase
+        description: "Release Manager reviews the complete release package including all approved configurations and provides final go/no-go decision. Release Manager can exclude or skip specific services from deployment even if previously staged and approved. Includes placeholder for ServiceNow status update. Failure handling: If rejected, notify all stakeholders with rejection reason and return to appropriate phase based on feedback."
+        id: final_approval_phase
+        name: Final Release Approval
+        owners:
+          - Release_Managers
+    - phase:
+        activities:
+          - activity: Deploy_Service
+            id: Deploy_Service
+            name: Deploy Service
+            description: ""
+            depends-on: []
+        depends-on:
+          - final_approval_phase
+        description: "Deploy approved services to Staging environment using Kubernetes/Helm with rolling deployment strategy. Apply environment-specific configurations. Track deployment configuration for future release reuse (Staging-specific). Includes placeholder for ServiceNow deployment status update. Failure handling: If deployment fails, trigger rollback, notify stakeholders, and halt sequential deployment progression."
+        id: staging_deployment_phase
+        name: Staging Environment Deployment
+        owners:
+          - _project_all_users
+    - phase:
+        activities:
+          - activity: Deploy_Service
+            id: Deploy_Service
+            name: Deploy Service
+            description: ""
+            depends-on: []
+        depends-on:
+          - staging_deployment_phase
+        description: "Deploy approved services to Production environment using Kubernetes/Helm with rolling deployment strategy. Apply environment-specific configurations. Track deployment configuration for future release reuse (Prod-specific). Includes placeholder for ServiceNow deployment completion and change ticket closure. Failure handling: If deployment fails, trigger rollback, execute incident notification procedures, and update ServiceNow with failure details."
+        id: prod_deployment_phase
+        name: Prod Environment Deployment
+        owners:
+          - _project_all_users
+    - phase:
+        activities:
+          - activity: Post_Deploy_Activity
+            id: Post_Deploy_Activity
+            name: Post Deploy Activity
+            description: ""
+            depends-on: []
+        depends-on:
+          - prod_deployment_phase
+        description: "Capture and persist final deployed configurations for each service per environment for Day-2 configuration reuse. Store service name, project, environment, release ticket, and all configuration values (Image Tag, CPU, Memory). Update ServiceNow change ticket with deployment completion status. Generate release summary report. Failure handling: If tracking fails, log error but do not fail the release; notify administrators for manual reconciliation."
+        id: configuration_tracking_phase
+        name: Configuration Tracking and Closure
+        owners:
+          - Performance_Engineer
+          - QA_Approvers
