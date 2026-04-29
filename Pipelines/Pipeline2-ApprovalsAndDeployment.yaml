@@ -1,0 +1,259 @@
+# Release approvals + UAT deployment — reusable template
+#
+# Customize: org/project, pipeline variables (ticket label, approver group). If you rename
+# L1 stage/step IDs, update L2 expressions that read L1 approver outputs.
+# Harness renders approvalMessage as plain text only (no Markdown).
+
+pipeline:
+  name: Release Management Pipeline V2
+  identifier: Release_Management_Pipeline_V2
+  description: >
+    Tiered human approvals (UAT → CAB → Ops) then UAT Kubernetes deployment.
+    Approval messages are plain text; shared variables keep wording consistent when reused.
+  orgIdentifier: <+org.identifier>
+  projectIdentifier: <+project.identifier>
+  tags: {}
+  allowStageExecutions: true
+
+  variables:
+    # —— Release context (shown in every approval) ——
+    - name: releaseVersion
+      type: String
+      description: Semantic version of the release (e.g. 1.4.2)
+      value: 1.0.0
+    - name: deploymentType
+      type: String
+      description: Type of deployment (e.g. new-release, hotfix, rollback)
+      value: new-release
+    - name: changeDescription
+      type: String
+      description: Brief description of what this release contains
+      value: This has changes for the new application release
+    - name: rollbackPlan
+      type: String
+      description: Rollback plan reference or summary if deployment must be reversed
+      value: Please find it on wiki.harness.io
+    - name: serviceNowTicketNumber
+      type: String
+      description: Change / ServiceNow ticket ID (or other CMDB reference)
+      required: false
+      value: <+input>
+    - name: changeTicketLabel
+      type: String
+      description: Label shown in approval UI for the ticket field (e.g. ServiceNow, Jira CHG)
+      value: Change ticket
+
+    # —— Shared approval behavior (one place to tune reuse) ——
+    - name: approvalUserGroup
+      type: String
+      description: Harness user group identifier allowed to approve (project or account scope)
+      value: _project_all_users
+
+  stages:
+    - stage:
+        name: L1 Approval - UAT Sign-Off
+        identifier: L1_Approval_UAT_Signoff
+        description: |
+          QA/UAT confirms testing is complete and the release may advance toward production.
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: UAT Sign-Off Approval
+                  identifier: UAT_Signoff_Approval
+                  type: HarnessApproval
+                  timeout: 1d
+                  spec:
+                    approvalMessage: |
+                      GATE L1 — UAT SIGN-OFF
+
+                      RELEASE CONTEXT
+                        Version:           <+pipeline.variables.releaseVersion>
+                        Deployment type:   <+pipeline.variables.deploymentType>
+                        <+pipeline.variables.changeTicketLabel>:  <+pipeline.variables.serviceNowTicketNumber>
+
+                      CHANGE DESCRIPTION
+                        <+pipeline.variables.changeDescription>
+
+                      ----------------------------------------
+
+                      WHAT WE NEED FROM YOU
+                        - Confirm UAT is complete for this version.
+                        - Enter the UAT sign-off page URL and test results summary in the inputs below.
+
+                      Next step after approval: CAB review (L2).
+                    includePipelineExecutionHistory: true
+                    isAutoRejectEnabled: false
+                    approvers:
+                      userGroups:
+                        - <+pipeline.variables.approvalUserGroup>
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs:
+                      - name: UATSignOffPageURL
+                        defaultValue: ""
+                      - name: TestResultsSummary
+                        defaultValue: ""
+
+    - stage:
+        name: L2 Approval - Change Advisory Board
+        identifier: L2_Approval_CAB
+        description: |
+          CAB reviews the change record, rollback plan, and UAT evidence before production promotion.
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: CAB Approval
+                  identifier: CAB_Approval
+                  type: HarnessApproval
+                  timeout: 1d
+                  spec:
+                    approvalMessage: |
+                      GATE L2 — CHANGE ADVISORY BOARD (CAB)
+
+                      RELEASE CONTEXT
+                        Version:           <+pipeline.variables.releaseVersion>
+                        Deployment type:   <+pipeline.variables.deploymentType>
+                        <+pipeline.variables.changeTicketLabel>:  <+pipeline.variables.serviceNowTicketNumber>
+                        Rollback plan:     <+pipeline.variables.rollbackPlan>
+
+                      UAT EVIDENCE (FROM L1)
+                        UAT sign-off URL:
+                        <+pipeline.stages.L1_Approval_UAT_Signoff.spec.execution.steps.UAT_Signoff_Approval.output.approverInputs.UATSignOffPageURL>
+
+                        Test results:
+                        <+pipeline.stages.L1_Approval_UAT_Signoff.spec.execution.steps.UAT_Signoff_Approval.output.approverInputs.TestResultsSummary>
+
+                      ----------------------------------------
+
+                      WHAT WE NEED FROM YOU
+                        Review the change ticket, rollback plan, and UAT outputs above.
+                        Add CAB notes in the input below if needed.
+
+                      Next step after approval: Operations final sign-off (L3).
+                    includePipelineExecutionHistory: true
+                    isAutoRejectEnabled: false
+                    approvers:
+                      userGroups:
+                        - <+pipeline.variables.approvalUserGroup>
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs:
+                      - name: CABNotes
+                        defaultValue: ""
+
+    - stage:
+        name: L3 Approval - Operations Final Sign-Off
+        identifier: L3_Approval_Ops
+        description: |
+          Final human gate: Ops / release management confirms window, readiness, and handoff before production rollout.
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Ops Final Approval
+                  identifier: Ops_Final_Approval
+                  type: HarnessApproval
+                  timeout: 1d
+                  spec:
+                    approvalMessage: |
+                      GATE L3 — OPERATIONS FINAL SIGN-OFF
+
+                      RELEASE CONTEXT
+                        Version:           <+pipeline.variables.releaseVersion>
+                        Deployment type:   <+pipeline.variables.deploymentType>
+                        <+pipeline.variables.changeTicketLabel>:  <+pipeline.variables.serviceNowTicketNumber>
+
+                      ROLLBACK PLAN
+                        <+pipeline.variables.rollbackPlan>
+
+                      ----------------------------------------
+
+                      WHAT WE NEED FROM YOU
+                        Confirm deployment window, on-call coverage, and readiness using the inputs below.
+
+                      This is the last approval before any downstream production automation (if configured).
+
+                      Reject or hold if the window or staffing is not confirmed.
+                    includePipelineExecutionHistory: true
+                    isAutoRejectEnabled: false
+                    approvers:
+                      userGroups:
+                        - <+pipeline.variables.approvalUserGroup>
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs:
+                      - name: DeploymentWindowConfirmed
+                        defaultValue: "yes"
+                      - name: OnCallEngineer
+                        defaultValue: ""
+
+    - stage:
+        name: UAT Deployment
+        identifier: UAT_Deployment
+        description: Deploy selected service to UAT after approvals complete.
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: <+input>
+            serviceInputs: <+input>
+          environment:
+            environmentRef: account.AWSISELab
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: AWSInfra
+          execution:
+            steps:
+              - step:
+                  type: HarnessApproval
+                  name: Pre-deploy confirmation UAT
+                  identifier: UAT_PreDeploy_Approval
+                  spec:
+                    approvalMessage: |
+                      PRE-DEPLOY CHECK — UAT
+
+                      You are about to deploy to UAT:
+                        Version:           <+pipeline.variables.releaseVersion>
+                        Deployment type:   <+pipeline.variables.deploymentType>
+
+                        <+pipeline.variables.changeTicketLabel>:  <+pipeline.variables.serviceNowTicketNumber>
+                        Summary:           <+pipeline.variables.changeDescription>
+
+                      ----------------------------------------
+
+                      Approve to run the Kubernetes deploy step, or reject to stop the pipeline.
+                    includePipelineExecutionHistory: true
+                    isAutoRejectEnabled: false
+                    approvers:
+                      userGroups:
+                        - <+pipeline.variables.approvalUserGroup>
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+                  timeout: 1d
+              - step:
+                  type: K8sRollingDeploy
+                  name: Deploy to UAT
+                  identifier: Deploy_to_UAT
+                  timeout: 15m
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+            rollbackSteps:
+              - step:
+                  type: K8sRollingRollback
+                  name: Rollback UAT
+                  identifier: Rollback_UAT
+                  timeout: 10m
+                  spec: {}
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
