@@ -1,0 +1,105 @@
+pipeline:
+  name: Validate Change Ticket
+  identifier: Validate_Change_Ticket
+  orgIdentifier: <+org.identifier>
+  projectIdentifier: <+project.identifier>
+  description: Validate Change Ticket; outputs sys_id + validation flag for Release Orchestration.
+  tags: {}
+  variables:
+    - name: change_ticket_id
+      type: String
+      description: ServiceNow change number passed from RO activity input mapping.
+      value: <+input>
+    - name: windowStart
+      type: String
+      description: SNOW Ticket Window Start
+      required: true
+      value: <+input>
+    - name: windowEnd
+      type: String
+      description: SNOW Ticket Window End
+      required: true
+      value: <+input>
+  stages:
+    - stage:
+        name: Validate SNOW Ticket
+        identifier: Validate_SNOW_Ticket
+        description: ""
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: SNOW Approval
+                  identifier: SNOW_Approval
+                  type: ServiceNowApproval
+                  timeout: 1d
+                  spec:
+                    approvalCriteria:
+                      type: KeyValues
+                      spec:
+                        matchAnyCondition: false
+                        conditions:
+                          - key: state
+                            operator: equals
+                            value: approved
+                    rejectionCriteria:
+                      type: KeyValues
+                      spec:
+                        matchAnyCondition: false
+                        conditions:
+                          - key: state
+                            operator: equals
+                            value: rejected
+                    connectorRef: <+input>
+                    ticketNumber: <+pipeline.variables.change_ticket_id>
+                    retryInterval: 1m
+                    ticketType: <+input>
+                    changeWindow:
+                      startField: <+pipeline.variables.windowStart>
+                      endField: <+pipeline.variables.windowEnd>
+        tags: {}
+    - stage:
+        name: Create PRs
+        identifier: Create_PRs
+        description: "This step creates PRs for the change ticket for the inputsets of all the services in the project."
+        type: CI
+        spec:
+          cloneCodebase: false
+          caching:
+            enabled: false
+            paths: []
+          buildIntelligence:
+            enabled: false
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Plugin
+                  name: Create PRs for Services
+                  identifier: Create_PRs_for_Services
+                  spec:
+                    registryRef: <+input>
+                    image: <+input>
+                    settings:
+                      REPO_URL: <+input> # The repo URL where the Input Sets are stored
+                      CHANGE_TICKET: <+pipeline.variables.change_ticket_id> # The change ticket ID
+                      HARNESS_PATH: .harness # The path where the Input Sets are stored
+                      BASE_BRANCH: main # The base branch to create the PRs from
+                      GIT_USERNAME: git # The username to use for the PRs
+                      GIT_TOKEN: <YOUR_GIT_TOKEN> # The token for creating PRs
+                      PR_BACKEND: harness # The backend to use for creating PRs ( harnesss or github or bitbucket)
+                      # Only required if PR_BACKEND is harness
+                      HARNESS_API_KEY: <YOUR_HARNESS_API_KEY> # The API key for creating PRs      
+                      HARNESS_REPO_IDENTIFIER: <YOUR_HARNESS_REPO_IDENTIFIER> # The repo identifier for creating PRs
+                      HARNESS_PROJECT_IDENTIFIER: <YOUR_HARNESS_PROJECT_IDENTIFIER> # The project identifier for creating PRs
+                      HARNESS_ORG_IDENTIFIER: <YOUR_HARNESS_ORG_IDENTIFIER> # The org identifier for creating PRs
+                      HARNESS_ACCOUNT_IDENTIFIER: <YOUR_HARNESS_ACCOUNT_IDENTIFIER> # The account identifier for creating PRs
+                      # Refer to Readme.md for more details on different backends and their variables.
+
+  allowStageExecutions: true

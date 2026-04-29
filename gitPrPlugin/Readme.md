@@ -3,7 +3,7 @@
 The plugin **clones** your repo, **edits** each `.yaml` / `.yml` under a path, **pushes** one topic branch per file, then **creates a pull request** per branch.
 
 - **Git** (clone, commit, push) works with any remote, same idea as **`drone_git_plugin.py`** (Commit To Git).
-- **PR creation** uses a **Host API** (not git): **Harness Code** (default when Harness settings are set) or **GitHub**. Set `PLUGIN_PR_BACKEND=none` to only push branches.
+- **PR creation** uses a **Host API** (not git): **Harness Code** (default when Harness settings are set), **GitHub**, or **Bitbucket Cloud** (`api.bitbucket.org`). Set `PLUGIN_PR_BACKEND=none` to only push branches. **Bitbucket Data Center / Server** uses a different API and is not covered here.
 
 ## What each PR changes
 
@@ -24,9 +24,10 @@ Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with
 
 | `PLUGIN_PR_BACKEND` | Behavior |
 |----------------------|----------|
-| *(unset)* | **Auto:** if Harness API settings are present → **harness**; if `github.com` in `PLUGIN_REPO_URL` → **github**; otherwise the run **fails** with a hint to set backend or vars. |
+| *(unset)* | **Auto:** if Harness API settings are present → **harness**; if `github.com` in `PLUGIN_REPO_URL` → **github**; if `bitbucket.org` → **bitbucket**; otherwise the run **fails** with a hint to set backend or vars. |
 | `harness` | Harness Code REST API (`x-api-key`). |
 | `github` | GitHub REST API (`Bearer` token). |
+| `bitbucket` | Bitbucket **Cloud** REST API 2.0 (OAuth2 **Bearer** or HTTP Basic with app password). |
 | `none` | Push branches only; **no** PR API calls. |
 
 ## Environment variables
@@ -70,6 +71,21 @@ Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with
 |----------|---------|-------------|
 | `PLUGIN_GITHUB_TOKEN` | falls back to `PLUGIN_GIT_TOKEN` | PAT with `repo` + PR scope. |
 | `PLUGIN_GITHUB_API_URL` | `https://api.github.com` | GitHub Enterprise API root if needed. |
+
+### Bitbucket Cloud PR API (when backend is bitbucket)
+
+Workspace and repository slug are parsed from `https://bitbucket.org/<workspace>/<repo_slug>` or `git@bitbucket.org:...` when possible. If your clone URL is not on `bitbucket.org`, set **`PLUGIN_BITBUCKET_WORKSPACE`** and **`PLUGIN_BITBUCKET_REPO_SLUG`** and use **`PLUGIN_PR_BACKEND=bitbucket`**.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLUGIN_BITBUCKET_API_URL` | `https://api.bitbucket.org/2.0` | Bitbucket Cloud API root (change only if Atlassian documents a different base). |
+| `PLUGIN_BITBUCKET_WORKSPACE` | *(empty)* | Overrides workspace segment when not inferable from `PLUGIN_REPO_URL`. |
+| `PLUGIN_BITBUCKET_REPO_SLUG` | *(empty)* | Overrides repo slug when not inferable from `PLUGIN_REPO_URL`. |
+| `PLUGIN_BITBUCKET_ACCESS_TOKEN` | *(empty)* | OAuth2 access token → **`Authorization: Bearer`**. |
+| `PLUGIN_BITBUCKET_USERNAME` | falls back to `PLUGIN_GIT_USERNAME` | Bitbucket account username (for HTTP Basic with app password). |
+| `PLUGIN_BITBUCKET_APP_PASSWORD` | falls back to `PLUGIN_GIT_TOKEN` | App password for Basic auth (same value often works for HTTPS git + REST). |
+
+Either **`PLUGIN_BITBUCKET_ACCESS_TOKEN`**, or **username + app password** (including via git vars above), is required.
 
 ### Drone outputs (`DRONE_OUTPUT`)
 
