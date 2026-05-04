@@ -1,11 +1,11 @@
-# Drone plugin: multi-branch YAML + pull requests
+# Drone plugin: single-branch YAML + release manifest + pull request
 
-The plugin **clones** your repo, **edits** each `.yaml` / `.yml` under a path, **pushes** one topic branch per file, then **creates a pull request** per branch.
+The plugin **clones** your repo, **edits** each `.yaml` / `.yml` under a path, adds **`release-manifest-<ticket>.yaml`** at the repo root, **pushes** one topic branch for the change ticket, then **creates one pull request**.
 
 - **Git** (clone, commit, push) works with any remote, same idea as **`drone_git_plugin.py`** (Commit To Git).
-- **PR creation** uses a **Host API** (not git): **Harness Code** (default when Harness settings are set), **GitHub**, or **Bitbucket Cloud** (`api.bitbucket.org`). Set `PLUGIN_PR_BACKEND=none` to only push branches. **Bitbucket Data Center / Server** uses a different API and is not covered here.
+- **PR creation** uses a **Host API** (not git): **Harness Code** (default when Harness settings are set) or **GitHub**. Set `PLUGIN_PR_BACKEND=none` to only push branches.
 
-## What each PR changes
+## What the PR changes
 
 At the **end of each touched YAML file** the plugin appends a **comment line** (and a trailing newline). Default text:
 
@@ -15,19 +15,20 @@ At the **end of each touched YAML file** the plugin appends a **comment line** (
 
 Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with `#`, a `#` prefix is added for YAML).
 
+It also creates **`release-manifest-<ticket>.yaml`** at the repository root with `ChangeTicket` and a `services` map: each scanned input set file contributes one entry (`<filename without extension>: true`). If the same base name appears in different folders, keys use the path with slashes replaced by hyphens (e.g. `folder-inputset-a`).
+
 ## Branches and base
 
 - **Base branch:** `main` by default (`PLUGIN_BASE_BRANCH`).
-- **Topic branch:** `release/<change-ticket>-<service>` (e.g. `service1.yaml` + `CHG-001` → `release/CHG-001-service1`).
+- **Topic branch:** `release/<change-ticket>` (e.g. `CHG-001` → `release/CHG-001`).
 
 ## PR backend selection
 
 | `PLUGIN_PR_BACKEND` | Behavior |
 |----------------------|----------|
-| *(unset)* | **Auto:** if Harness API settings are present → **harness**; if `github.com` in `PLUGIN_REPO_URL` → **github**; if `bitbucket.org` → **bitbucket**; otherwise the run **fails** with a hint to set backend or vars. |
+| *(unset)* | **Auto:** if Harness API settings are present → **harness**; if `github.com` in `PLUGIN_REPO_URL` → **github**; otherwise the run **fails** with a hint to set backend or vars. |
 | `harness` | Harness Code REST API (`x-api-key`). |
 | `github` | GitHub REST API (`Bearer` token). |
-| `bitbucket` | Bitbucket **Cloud** REST API 2.0 (OAuth2 **Bearer** or HTTP Basic with app password). |
 | `none` | Push branches only; **no** PR API calls. |
 
 ## Environment variables
@@ -51,7 +52,7 @@ Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with
 | `PLUGIN_WORK_DIR` | `/harness` | Parent directory for the clone. |
 | `PLUGIN_GIT_AUTHOR_NAME` | `Drone PR Plugin` | Commit author name. |
 | `PLUGIN_GIT_AUTHOR_EMAIL` | `drone-pr-plugin@local` | Commit author email. |
-| `PLUGIN_PR_TITLE_TEMPLATE` | `[{ticket}] {service} harness update` | PR title; `{ticket}`, `{service}`, `{path}`. |
+| `PLUGIN_PR_TITLE_TEMPLATE` | `InputSets for the release of change ticket {ticket}` | PR title; `{ticket}`, `{service}`, `{path}` (optional for custom templates). |
 | `PLUGIN_CHANGE_COMMENT_LINE` | *(see default above)* | Marker line appended at bottom of each YAML. |
 
 ### Harness Code PR API (when backend is harness)
@@ -71,21 +72,6 @@ Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with
 |----------|---------|-------------|
 | `PLUGIN_GITHUB_TOKEN` | falls back to `PLUGIN_GIT_TOKEN` | PAT with `repo` + PR scope. |
 | `PLUGIN_GITHUB_API_URL` | `https://api.github.com` | GitHub Enterprise API root if needed. |
-
-### Bitbucket Cloud PR API (when backend is bitbucket)
-
-Workspace and repository slug are parsed from `https://bitbucket.org/<workspace>/<repo_slug>` or `git@bitbucket.org:...` when possible. If your clone URL is not on `bitbucket.org`, set **`PLUGIN_BITBUCKET_WORKSPACE`** and **`PLUGIN_BITBUCKET_REPO_SLUG`** and use **`PLUGIN_PR_BACKEND=bitbucket`**.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PLUGIN_BITBUCKET_API_URL` | `https://api.bitbucket.org/2.0` | Bitbucket Cloud API root (change only if Atlassian documents a different base). |
-| `PLUGIN_BITBUCKET_WORKSPACE` | *(empty)* | Overrides workspace segment when not inferable from `PLUGIN_REPO_URL`. |
-| `PLUGIN_BITBUCKET_REPO_SLUG` | *(empty)* | Overrides repo slug when not inferable from `PLUGIN_REPO_URL`. |
-| `PLUGIN_BITBUCKET_ACCESS_TOKEN` | *(empty)* | OAuth2 access token → **`Authorization: Bearer`**. |
-| `PLUGIN_BITBUCKET_USERNAME` | falls back to `PLUGIN_GIT_USERNAME` | Bitbucket account username (for HTTP Basic with app password). |
-| `PLUGIN_BITBUCKET_APP_PASSWORD` | falls back to `PLUGIN_GIT_TOKEN` | App password for Basic auth (same value often works for HTTPS git + REST). |
-
-Either **`PLUGIN_BITBUCKET_ACCESS_TOKEN`**, or **username + app password** (including via git vars above), is required.
 
 ### Drone outputs (`DRONE_OUTPUT`)
 
@@ -156,15 +142,16 @@ Pass the same variables with `docker run -e ...`; mount a file for `DRONE_OUTPUT
 
 ### What to verify
 
-- Branches exist: `release/<ticket>-<service>`.
-- Each YAML ends with the **marker comment** line.
-- PRs exist in Harness / GitHub for each branch into `PLUGIN_BASE_BRANCH`.
+- Branch exists: `release/<ticket>`.
+- Root file **`release-manifest-<ticket>.yaml`** lists all input sets under `services:`.
+- Each scanned YAML ends with the **marker comment** line.
+- One PR exists in Harness / GitHub from that branch into `PLUGIN_BASE_BRANCH`.
 
 ## Drone step example (Harness)
 
 ```yaml
 steps:
-  - name: harness-prs-per-service
+  - name: harness-pr-release-inputsets
     image: your-registry/drone-pr-plugin:1.0.0
     environment:
       PLUGIN_REPO_URL: https://git.harness.io/org/proj/repo.git
