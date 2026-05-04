@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Drone plugin: clone a repo, append a marker comment to each YAML under a path, push
-one branch per file, then open a pull request per branch (Harness Code, GitHub, or
-Bitbucket Cloud REST API).
+Drone plugin: clone a repo, append a marker comment to each YAML under a path, add
+release-manifest-<ticket>.yaml, push one topic branch for the change ticket, then
+open a single pull request (Harness Code or GitHub API).
 """
 
-import base64
 import json
 import logging
 import os
 import re
+from collections import Counter
 import subprocess
 import sys
 import urllib.error
@@ -80,6 +80,31 @@ def slug_for_branch(name: str) -> str:
     return s.strip("-") or "service"
 
 
+def release_manifest_filename(ticket_part: str) -> str:
+    """Manifest file at repo root: release-manifest-<ticket>.yaml"""
+    return f"release-manifest-{ticket_part}.yaml"
+
+
+def yaml_manifest_key(stem: str) -> str:
+    """Quote YAML mapping key when the stem is not a plain unquoted token."""
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", stem):
+        return stem
+    return json.dumps(stem)
+
+
+def build_release_manifest_yaml(change_ticket: str, inputset_stems: List[str]) -> str:
+    """release-manifest content: ChangeTicket and services (one key per input set stem)."""
+    lines: List[str] = [
+        f"ChangeTicket: {change_ticket}",
+        "services:",
+        "  # Input set file names (without extension); all enabled for this release.",
+    ]
+    for stem in sorted(inputset_stems, key=lambda s: s.lower()):
+        k = yaml_manifest_key(stem)
+        lines.append(f"  {k}: true")
+    return "\n".join(lines) + "\n"
+
+
 def discover_yaml_files(root: Path, relative_dir: str) -> List[Path]:
     base = root / relative_dir.strip("/ ")
     if not base.is_dir():
@@ -106,105 +131,6 @@ def parse_github_repo(repo_url: str) -> Tuple[str, str]:
     if len(parts) >= 2:
         return parts[-2], parts[-1].replace(".git", "")
     raise PluginError(f"Could not parse owner/repo from PLUGIN_REPO_URL: {repo_url}")
-
-
-def parse_bitbucket_cloud_repo(repo_url: str) -> Tuple[str, str]:
-    """Return (workspace, repo_slug) from bitbucket.org https or git@ URL."""
-    u = repo_url.strip().rstrip("/")
-    if u.startswith("git@"):
-        m = re.search(
-            r"git@bitbucket\.org:([^/]+)/([^/]+?)(?:\.git)?$",
-            u,
-            flags=re.IGNORECASE,
-        )
-        if m:
-            return m.group(1), m.group(2)
-        raise PluginError(
-            f"Could not parse workspace/repo_slug from PLUGIN_REPO_URL: {repo_url}"
-        )
-    if "://" in u and "@" in u:
-        u = re.sub(r"https?://[^@]+@", "https://", u)
-    parsed = urlparse(u)
-    host = (parsed.hostname or "").lower()
-    if "bitbucket.org" not in host:
-        raise PluginError(
-            "Could not parse Bitbucket workspace/repo_slug from PLUGIN_REPO_URL "
-            f"(not bitbucket.org): {repo_url}"
-        )
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) >= 2:
-        return parts[-2], parts[-1].replace(".git", "")
-    raise PluginError(
-        f"Could not parse workspace/repo_slug from PLUGIN_REPO_URL: {repo_url}"
-    )
-
-
-def resolve_bitbucket_cloud_workspace_repo(cfg: Dict[str, Any]) -> Tuple[str, str]:
-    ws = str(cfg.get("bitbucket_workspace") or "").strip()
-    slug = str(cfg.get("bitbucket_repo_slug") or "").strip()
-    if ws and slug:
-        return ws, slug
-    return parse_bitbucket_cloud_repo(str(cfg.get("repo_url") or ""))
-
-
-def bitbucket_cloud_auth_headers(
-    username: str,
-    app_password: str,
-    bearer_token: str,
-) -> Dict[str, str]:
-    if bearer_token:
-        return {"Authorization": f"Bearer {bearer_token}"}
-    if username and app_password:
-        raw = f"{username}:{app_password}".encode("utf-8")
-        return {"Authorization": "Basic " + base64.b64encode(raw).decode("ascii")}
-    raise PluginError(
-        "Bitbucket PR: set PLUGIN_BITBUCKET_ACCESS_TOKEN (OAuth2), or "
-        "PLUGIN_BITBUCKET_USERNAME + PLUGIN_BITBUCKET_APP_PASSWORD — "
-        "or use PLUGIN_GIT_USERNAME + PLUGIN_GIT_TOKEN (app password) for Basic auth"
-    )
-
-
-def bitbucket_cloud_pr_html_url(pr: Dict[str, Any]) -> str:
-    links = pr.get("links") or {}
-    html = links.get("html")
-    if isinstance(html, dict):
-        return str(html.get("href") or "")
-    if isinstance(html, list) and html and isinstance(html[0], dict):
-        return str(html[0].get("href") or "")
-    return ""
-
-
-def create_pull_request_bitbucket_cloud(
-    api_base: str,
-    workspace: str,
-    repo_slug: str,
-    title: str,
-    source_branch: str,
-    dest_branch: str,
-    description: str,
-    username: str,
-    app_password: str,
-    bearer_token: str,
-) -> Dict[str, Any]:
-    """Bitbucket Cloud REST API 2.0."""
-    w = quote(workspace, safe="")
-    r = quote(repo_slug, safe="")
-    url = f"{api_base.rstrip('/')}/repositories/{w}/{r}/pullrequests"
-    headers = {
-        **bitbucket_cloud_auth_headers(username, app_password, bearer_token),
-    }
-    _, result = http_json(
-        "POST",
-        url,
-        headers,
-        {
-            "title": title,
-            "description": description,
-            "source": {"branch": {"name": source_branch}},
-            "destination": {"branch": {"name": dest_branch}},
-        },
-    )
-    return result if isinstance(result, dict) else {}
 
 
 def http_json(
@@ -306,8 +232,6 @@ def resolve_pr_backend(cfg: Dict[str, Any]) -> str:
         return "github"
     if explicit == "harness":
         return "harness"
-    if explicit == "bitbucket":
-        return "bitbucket"
     # Auto-detect when PLUGIN_PR_BACKEND is unset
     harness_ready = (
         cfg.get("harness_api_key")
@@ -316,19 +240,14 @@ def resolve_pr_backend(cfg: Dict[str, Any]) -> str:
     )
     if harness_ready:
         return "harness"
-    repo = str(cfg.get("repo_url") or "").lower()
+    repo = str(cfg.get("repo_url") or "")
     if "github.com" in repo:
         return "github"
-    if "bitbucket.org" in repo:
-        return "bitbucket"
     raise PluginError(
-        "Cannot determine PR backend: set PLUGIN_PR_BACKEND to harness, github, "
-        "bitbucket, or none. "
+        "Cannot determine PR backend: set PLUGIN_PR_BACKEND=harness or github, or none. "
         "Harness: PLUGIN_HARNESS_API_KEY, PLUGIN_HARNESS_REPO_IDENTIFIER, "
-        "PLUGIN_HARNESS_ACCOUNT_IDENTIFIER. GitHub: github.com in URL and "
-        "PLUGIN_GITHUB_TOKEN or PLUGIN_GIT_TOKEN. Bitbucket Cloud: bitbucket.org "
-        "in URL (or set PLUGIN_BITBUCKET_WORKSPACE + PLUGIN_BITBUCKET_REPO_SLUG with "
-        "PLUGIN_PR_BACKEND=bitbucket) and OAuth or app password credentials."
+        "PLUGIN_HARNESS_ACCOUNT_IDENTIFIER. GitHub: host github.com and "
+        "PLUGIN_GITHUB_TOKEN or PLUGIN_GIT_TOKEN."
     )
 
 
@@ -345,7 +264,7 @@ def load_config() -> Dict[str, Any]:
     git_email = os.environ.get("PLUGIN_GIT_AUTHOR_EMAIL", "drone-pr-plugin@local").strip()
     title_tmpl = os.environ.get(
         "PLUGIN_PR_TITLE_TEMPLATE",
-        "[{ticket}] {service} harness update",
+        "InputSets for the release of change ticket {ticket}",
     ).strip()
     comment_line = os.environ.get("PLUGIN_CHANGE_COMMENT_LINE", DEFAULT_YAML_COMMENT).strip()
     if not comment_line.startswith("#"):
@@ -361,17 +280,6 @@ def load_config() -> Dict[str, Any]:
     harness_account = os.environ.get("PLUGIN_HARNESS_ACCOUNT_IDENTIFIER", "").strip()
     harness_org = os.environ.get("PLUGIN_HARNESS_ORG_IDENTIFIER", "").strip()
     harness_project = os.environ.get("PLUGIN_HARNESS_PROJECT_IDENTIFIER", "").strip()
-
-    bitbucket_api_url = os.environ.get(
-        "PLUGIN_BITBUCKET_API_URL", "https://api.bitbucket.org/2.0"
-    ).strip()
-    bitbucket_workspace = os.environ.get("PLUGIN_BITBUCKET_WORKSPACE", "").strip()
-    bitbucket_repo_slug = os.environ.get("PLUGIN_BITBUCKET_REPO_SLUG", "").strip()
-    bitbucket_username = os.environ.get("PLUGIN_BITBUCKET_USERNAME", "").strip() or username
-    bitbucket_app_password = (
-        os.environ.get("PLUGIN_BITBUCKET_APP_PASSWORD", "").strip() or token
-    )
-    bitbucket_access_token = os.environ.get("PLUGIN_BITBUCKET_ACCESS_TOKEN", "").strip()
 
     if not repo_url:
         raise PluginError("PLUGIN_REPO_URL is required")
@@ -400,12 +308,6 @@ def load_config() -> Dict[str, Any]:
         "harness_account_identifier": harness_account,
         "harness_org_identifier": harness_org,
         "harness_project_identifier": harness_project,
-        "bitbucket_api_url": bitbucket_api_url,
-        "bitbucket_workspace": bitbucket_workspace,
-        "bitbucket_repo_slug": bitbucket_repo_slug,
-        "bitbucket_username": bitbucket_username,
-        "bitbucket_app_password": bitbucket_app_password,
-        "bitbucket_access_token": bitbucket_access_token,
     }
     cfg["resolved_pr_backend"] = resolve_pr_backend(cfg)
     return cfg
@@ -453,24 +355,6 @@ def main() -> int:
                 raise PluginError(
                     "GitHub PR: set PLUGIN_GITHUB_TOKEN or PLUGIN_GIT_TOKEN for API"
                 )
-        elif backend == "bitbucket":
-            try:
-                resolve_bitbucket_cloud_workspace_repo(cfg)
-            except PluginError as e:
-                raise PluginError(
-                    "Bitbucket PR: set PLUGIN_BITBUCKET_WORKSPACE and "
-                    "PLUGIN_BITBUCKET_REPO_SLUG, or use a bitbucket.org clone URL. "
-                    f"({e})"
-                ) from e
-            if not cfg["bitbucket_access_token"] and not (
-                cfg["bitbucket_username"] and cfg["bitbucket_app_password"]
-            ):
-                raise PluginError(
-                    "Bitbucket PR: set PLUGIN_BITBUCKET_ACCESS_TOKEN (OAuth2), or "
-                    "username + app password via PLUGIN_BITBUCKET_USERNAME and "
-                    "PLUGIN_BITBUCKET_APP_PASSWORD, or PLUGIN_GIT_USERNAME and "
-                    "PLUGIN_GIT_TOKEN (same app password as HTTPS git)"
-                )
 
         cfg["work_dir"].mkdir(parents=True, exist_ok=True)
         repo_folder_name = str(cfg["repo_url"]).split("/")[-1].replace(".git", "")
@@ -501,125 +385,130 @@ def main() -> int:
         if backend == "github":
             gh_owner, gh_repo = parse_github_repo(str(cfg["repo_url"]))
 
-        bb_workspace: Optional[str] = None
-        bb_repo_slug: Optional[str] = None
-        if backend == "bitbucket":
-            bb_workspace, bb_repo_slug = resolve_bitbucket_cloud_workspace_repo(cfg)
+        ticket_part = slug_for_branch(str(cfg["ticket"]))
+        branch = f"{cfg['branch_prefix']}/{ticket_part}"
+        manifest_name = release_manifest_filename(ticket_part)
+        manifest_rel = manifest_name
 
+        title = str(cfg["title_tmpl"]).format(
+            ticket=str(cfg["ticket"]),
+            service="",  # unused in default template; kept for custom templates
+            path="",  # unused in default template
+        )
+
+        file_list = "\n".join(
+            f"- `{p.relative_to(repo_path).as_posix()}`" for p in yaml_files
+        )
+        description = (
+            f"Automated PR for change **{cfg['ticket']}**.\n\n"
+            f"- Manifest: `{manifest_rel}`\n"
+            f"- Branch: `{branch}`\n"
+            f"- Base: `{cfg['base_branch']}`\n\n"
+            f"**Updated YAML files:**\n\n{file_list}\n"
+        )
+
+        logger.info("Syncing %s and creating branch %s", cfg["base_branch"], branch)
+        run_git(["fetch", "origin", str(cfg["base_branch"])], repo_path)
+        run_git(
+            ["checkout", "-B", str(cfg["base_branch"]), f"origin/{cfg['base_branch']}"],
+            repo_path,
+        )
+
+        run_git(["checkout", "-b", branch], repo_path)
+
+        stem_counts = Counter(p.stem for p in yaml_files)
+
+        def manifest_key_for(yp: Path) -> str:
+            if stem_counts[yp.stem] > 1:
+                rel_no_ext = yp.relative_to(repo_path).as_posix().rsplit(".", 1)[0]
+                return rel_no_ext.replace("/", "-")
+            return yp.stem
+
+        stems: List[str] = []
+        rel_paths: List[str] = []
         for ypath in yaml_files:
             rel = ypath.relative_to(repo_path).as_posix()
-            service = slug_for_branch(ypath.stem)
-            ticket_part = slug_for_branch(str(cfg["ticket"]))
-            branch = f"{cfg['branch_prefix']}/{ticket_part}-{service}"
-
-            title = str(cfg["title_tmpl"]).format(
-                ticket=str(cfg["ticket"]), service=ypath.stem, path=rel
-            )
-            description = (
-                f"Automated PR for change **{cfg['ticket']}**.\n\n"
-                f"- File: `{rel}`\n"
-                f"- Branch: `{branch}`\n"
-                f"- Base: `{cfg['base_branch']}`\n"
-            )
-
-            logger.info("Syncing %s and creating branch %s", cfg["base_branch"], branch)
-            run_git(["fetch", "origin", str(cfg["base_branch"])], repo_path)
-            run_git(
-                ["checkout", "-B", str(cfg["base_branch"]), f"origin/{cfg['base_branch']}"],
-                repo_path,
-            )
-
-            run_git(["checkout", "-b", branch], repo_path)
-
+            rel_paths.append(rel)
+            stems.append(manifest_key_for(ypath))
             raw = ypath.read_text(encoding="utf-8")
             ypath.write_text(
                 append_comment_line(raw, str(cfg["comment_line"])),
                 encoding="utf-8",
             )
 
-            msg = f"{cfg['ticket']}: marker comment + PR for {rel}"
+        manifest_path = repo_path / manifest_name
+        manifest_path.write_text(
+            build_release_manifest_yaml(str(cfg["ticket"]), stems),
+            encoding="utf-8",
+        )
+
+        for rel in rel_paths:
             run_git(["add", rel], repo_path)
-            run_git(["commit", "-m", msg], repo_path)
+        run_git(["add", manifest_rel], repo_path)
 
-            logger.info("Pushing branch %s", branch)
-            subprocess.run(
-                ["git", "push", "-u", "origin", branch],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True,
+        msg = (
+            f"{cfg['ticket']}: marker comments on input sets + {manifest_name}"
+        )
+        run_git(["commit", "-m", msg], repo_path)
+
+        logger.info("Pushing branch %s", branch)
+        subprocess.run(
+            ["git", "push", "-u", "origin", branch],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pushed_branches.append(branch)
+
+        pr_url = ""
+        pr_number: Optional[int] = None
+        if backend == "none":
+            logger.info("PLUGIN_PR_BACKEND=none: skipping PR creation")
+        elif backend == "github" and gh_owner and gh_repo:
+            logger.info("Creating GitHub pull request")
+            pr = create_pull_request_github(
+                str(cfg["github_api_url"]),
+                str(cfg["github_api_token"]),
+                gh_owner,
+                gh_repo,
+                title,
+                branch,
+                str(cfg["base_branch"]),
+                description,
             )
-            pushed_branches.append(branch)
-
-            pr_url = ""
-            pr_number: Optional[int] = None
-            if backend == "none":
-                logger.info("PLUGIN_PR_BACKEND=none: skipping PR creation")
-            elif backend == "github" and gh_owner and gh_repo:
-                logger.info("Creating GitHub pull request")
-                pr = create_pull_request_github(
-                    str(cfg["github_api_url"]),
-                    str(cfg["github_api_token"]),
-                    gh_owner,
-                    gh_repo,
-                    title,
-                    branch,
-                    str(cfg["base_branch"]),
-                    description,
-                )
-                pr_url = str(pr.get("html_url", "") or "")
-                num = pr.get("number")
-                pr_number = int(num) if isinstance(num, int) else None
-                pr_records.append({"backend": "github", "url": pr_url, "number": pr_number})
-                logger.info("PR opened: %s", pr_url or pr)
-            elif backend == "bitbucket" and bb_workspace and bb_repo_slug:
-                logger.info("Creating Bitbucket Cloud pull request")
-                pr = create_pull_request_bitbucket_cloud(
-                    str(cfg["bitbucket_api_url"]),
-                    bb_workspace,
-                    bb_repo_slug,
-                    title,
-                    branch,
-                    str(cfg["base_branch"]),
-                    description,
-                    str(cfg["bitbucket_username"]),
-                    str(cfg["bitbucket_app_password"]),
-                    str(cfg["bitbucket_access_token"]),
-                )
-                pr_url = bitbucket_cloud_pr_html_url(pr)
-                bid = pr.get("id")
-                pr_number = int(bid) if isinstance(bid, int) else None
-                pr_records.append(
-                    {"backend": "bitbucket", "url": pr_url, "number": pr_number}
-                )
-                logger.info("PR opened: %s", pr_url or pr)
-            elif backend == "harness":
-                logger.info("Creating Harness Code pull request")
-                pr = create_pull_request_harness(
-                    str(cfg["harness_platform_url"]),
-                    str(cfg["harness_api_key"]),
-                    str(cfg["harness_repo_identifier"]),
-                    str(cfg["harness_account_identifier"]),
-                    str(cfg["harness_org_identifier"]),
-                    str(cfg["harness_project_identifier"]),
-                    title,
-                    branch,
-                    str(cfg["base_branch"]),
-                    description,
-                )
-                num = pr.get("number")
-                pr_number = int(num) if isinstance(num, int) else None
-                pr_url = str(pr.get("url", "") or "")
-                pr_records.append(
-                    {
-                        "backend": "harness",
-                        "number": pr_number,
-                        "title": pr.get("title"),
-                        "source_branch": pr.get("source_branch"),
-                        "target_branch": pr.get("target_branch"),
-                    }
-                )
-                logger.info("Harness PR created: #%s %s", pr_number, title)
+            pr_url = str(pr.get("html_url", "") or "")
+            num = pr.get("number")
+            pr_number = int(num) if isinstance(num, int) else None
+            pr_records.append({"backend": "github", "url": pr_url, "number": pr_number})
+            logger.info("PR opened: %s", pr_url or pr)
+        elif backend == "harness":
+            logger.info("Creating Harness Code pull request")
+            pr = create_pull_request_harness(
+                str(cfg["harness_platform_url"]),
+                str(cfg["harness_api_key"]),
+                str(cfg["harness_repo_identifier"]),
+                str(cfg["harness_account_identifier"]),
+                str(cfg["harness_org_identifier"]),
+                str(cfg["harness_project_identifier"]),
+                title,
+                branch,
+                str(cfg["base_branch"]),
+                description,
+            )
+            num = pr.get("number")
+            pr_number = int(num) if isinstance(num, int) else None
+            pr_url = str(pr.get("url", "") or "")
+            pr_records.append(
+                {
+                    "backend": "harness",
+                    "number": pr_number,
+                    "title": pr.get("title"),
+                    "source_branch": pr.get("source_branch"),
+                    "target_branch": pr.get("target_branch"),
+                }
+            )
+            logger.info("Harness PR created: #%s %s", pr_number, title)
 
         pr_urls_out = [
             r.get("url", "")
