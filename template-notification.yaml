@@ -1,0 +1,311 @@
+template:
+  name: New Release Created
+  identifier: New_Release_Created
+  versionLabel: v1
+  type: Notification
+  projectIdentifier: Gitops
+  orgIdentifier: default
+  tags: {}
+  spec:
+    body:
+      content: |
+        subject: "A new release has been scheduled with Change Ticket - <+notification.variables.changeTicket>"
+
+        body: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <title>Harness Release Notification</title>
+
+            <style>
+              body {
+                margin: 0;
+                padding: 0;
+                background-color: #f4f6f9;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                color: #1e293b;
+              }
+
+              .wrapper {
+                max-width: 720px;
+                margin: 40px auto;
+                background: #ffffff;
+                border-radius: 14px;
+                overflow: hidden;
+                border: 1px solid #e2e8f0;
+                box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
+              }
+
+              .header {
+                background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+                padding: 36px 42px;
+                text-align: center;
+              }
+
+              .header h1 {
+                color: #ffffff;
+                font-size: 26px;
+                margin: 0;
+                font-weight: 700;
+                letter-spacing: 0.3px;
+              }
+
+              .header p {
+                color: rgba(255,255,255,0.88);
+                font-size: 13px;
+                margin-top: 10px;
+              }
+
+              .status-banner {
+                background: #ecfdf3;
+                border-left: 5px solid #22c55e;
+                color: #15803d;
+                padding: 16px 40px;
+                font-size: 15px;
+                font-weight: 600;
+              }
+
+              .content {
+                padding: 36px 40px;
+              }
+
+              .section-title {
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 1.4px;
+                color: #2563eb;
+                margin: 32px 0 14px;
+                padding-bottom: 8px;
+                border-bottom: 1px solid #e2e8f0;
+              }
+
+              table.details {
+                width: 100%;
+                border-collapse: collapse;
+              }
+
+              table.details tr td {
+                padding: 13px 0;
+                border-bottom: 1px solid #edf2f7;
+                vertical-align: top;
+                font-size: 14px;
+              }
+
+              table.details tr td:first-child {
+                width: 38%;
+                color: #64748b;
+                font-weight: 600;
+              }
+
+              table.details tr td:last-child {
+                color: #0f172a;
+                font-weight: 500;
+              }
+
+              .badge {
+                display: inline-block;
+                padding: 5px 14px;
+                border-radius: 999px;
+                background: #dbeafe;
+                color: #2563eb;
+                font-size: 12px;
+                font-weight: 700;
+              }
+
+              .branch-badge {
+                display: inline-block;
+                padding: 5px 12px;
+                border-radius: 999px;
+                background: #ede9fe;
+                color: #7c3aed;
+                font-size: 12px;
+                font-weight: 700;
+              }
+
+              .action-box {
+                margin-top: 30px;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                padding: 24px 26px;
+              }
+
+              .action-box h3 {
+                margin-top: 0;
+                color: #0f172a;
+                font-size: 18px;
+              }
+
+              .action-box ul {
+                margin: 16px 0 0;
+                padding-left: 20px;
+              }
+
+              .action-box li {
+                margin-bottom: 12px;
+                color: #334155;
+                line-height: 1.7;
+              }
+
+              .cta {
+                text-align: center;
+                margin: 36px 0 10px;
+              }
+
+              .cta a {
+                background: linear-gradient(135deg, #2563eb, #7c3aed);
+                color: #ffffff;
+                text-decoration: none;
+                padding: 14px 34px;
+                border-radius: 8px;
+                font-size: 15px;
+                font-weight: 700;
+                display: inline-block;
+              }
+
+              .footer {
+                background: #f8fafc;
+                border-top: 1px solid #e2e8f0;
+                text-align: center;
+                padding: 24px 40px;
+                font-size: 12px;
+                color: #64748b;
+                line-height: 1.8;
+              }
+
+              .footer a {
+                color: #2563eb;
+                text-decoration: none;
+              }
+
+              a {
+                color: #2563eb;
+                text-decoration: none;
+              }
+            </style>
+          </head>
+
+          <body>
+
+            <div class="wrapper">
+
+              <div class="header">
+                <h1>🚀 New Release Created</h1>
+                <p>Harness Enterprise Release Management Notification</p>
+              </div>
+
+              <div class="status-banner">
+                ✅ A new release has been created and pushed successfully.
+              </div>
+
+              <div class="content">
+
+                <div class="section-title">Release Information</div>
+
+                <table class="details">         
+
+                  <tr>
+                    <td>Change Ticket</td>
+                    <td>
+                      <span class="badge">
+                        <+notification.variables.changeTicket>
+                      </span>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td>Release Branch</td>
+                    <td>
+                      <span class="branch-badge">
+                        <+notification.variables.branch>
+                      </span>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td>Repository URL</td>
+                    <td>
+                      <+notification.variables.gitRepo>
+                    </td>
+                  </tr>                 
+
+                  <tr>
+                    <td>Execution Status</td>
+                    <td>
+                      <span class="badge">
+                        <+pipeline.status>
+                      </span>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td>Execution URL</td>
+                    <td>
+                      <a href="<+pipeline.executionUrl>">
+                        View Pipeline Execution
+                      </a>
+                    </td>
+                  </tr>
+
+                </table>
+
+                <div class="section-title">Action Required</div>
+
+                <div class="action-box">
+
+                  <h3>📋 Required Validation & Approval Steps</h3>
+
+                  <ul>
+                    <li>
+                      <strong>Developers</strong> are requested to perform the required changes and validations for this release branch.
+                    </li>
+
+                    <li>
+                      <strong>QA Engineers</strong> are requested to validate all impacted services and test scenarios thoroughly.
+                    </li>
+
+                    <li>
+                      <strong>SPA Engineers</strong> are requested to approve the release post successful validation.
+                    </li>
+
+                    <li>
+                      Ensure all validations, approvals, and sign-offs are completed before production deployment.
+                    </li>
+                  </ul>
+
+                </div>
+
+                <div class="cta">
+                  <a href="<+pipeline.executionUrl>">
+                    View Release Execution →
+                  </a>
+                </div>
+
+              </div>
+
+              <div class="footer">
+                This is an automated notification from the
+                <strong>Harness Release Management Platform</strong>.
+                <br/>
+                Please do not reply directly to this email.
+                <br/><br/>
+                <a href="<+pipeline.executionUrl>">Open Harness Execution</a>
+              </div>
+
+            </div>
+
+          </body>
+          </html>
+      type: YAML
+    variables:
+      - name: changeTicket
+        value: <+input>
+        type: string
+      - name: branch
+        value: <+input>
+        type: string
+      - name: gitRepo
+        value: <+input>
+        type: string
