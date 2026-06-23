@@ -41,20 +41,25 @@ release-CHG0000001/
 ```yaml
 changeTicket: CHG0000001
 services:
-  - nginx_blue.yml
-  - alpine_blue.yml
-  - service1_dr_blue.yml
+  nginx_blue: true
+  alpine_blue: true
+  service1_dr_blue: true
 ```
 
-**`online-green-services.yml`**
+**`online-green-services.yml`** (preferred — flat map, no list dashes)
 
 ```yaml
 changeTicket: CHG0000002
 services:
-  - nginx_green.yml
-  - nginx_route_change.yml
-  - alpine_route_change.yml
+  service1_goldtier_green: true
+  service1_goldtier_dr_green: true
+  nginx_route_change: true
+  alpine_route_change: true
 ```
+
+List-of-maps format (`- service: true`) is also accepted by the evaluation script, but the plugin generates the flat map above.
+
+Each service defaults to `true`. Set a service to `false` in the PR review to skip it for that release (same toggle model as standard mode).
 
 Service discovery scans `PLUGIN_HARNESS_PATH` recursively:
 
@@ -187,6 +192,52 @@ docker build -t your-registry/drone-pr-plugin:1.0.0 .
         HARNESS_ORG_IDENTIFIER: default
         HARNESS_PROJECT_IDENTIFIER: ElevanceHealth
 ```
+
+## Manifest evaluation scripts
+
+After the PR is merged, a **ShellScript** step reads the manifest and exports the same outputs for both modes.
+
+| Script | Mode | Manifest path |
+|--------|------|----------------|
+| `scripts/evaluate-standard-release-manifest.sh` | `standard` | `release-manifest-<ticket>.yaml` |
+| `scripts/evaluate-blue-green-release-manifest.sh` | `blue-green` | `release-<ticket>/offline-<color>-services.yml` or `online-<color>-services.yml` |
+
+Both export `ENABLED_SERVICES_JSON` and `SKIPPED_SERVICES_JSON` for downstream Harness steps.
+
+### Standard (your existing logic)
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.changeTicket>
+source scripts/evaluate-standard-release-manifest.sh
+```
+
+### Blue-green — offline deploy pipeline
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.offlineChangeTicket>
+ONLINE_CHANGE_TICKET=<+pipeline.variables.onlineChangeTicket>
+OFFLINE_COLOR=<+pipeline.variables.offlineColor>
+ONLINE_COLOR=<+pipeline.variables.onlineColor>
+RELEASE_PHASE=offline
+HARNESS_PATH=.harness
+source scripts/evaluate-blue-green-release-manifest.sh
+```
+
+### Blue-green — route-change pipeline
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.offlineChangeTicket>
+ONLINE_CHANGE_TICKET=<+pipeline.variables.onlineChangeTicket>
+OFFLINE_COLOR=<+pipeline.variables.offlineColor>
+ONLINE_COLOR=<+pipeline.variables.onlineColor>
+RELEASE_PHASE=online
+HARNESS_PATH=.harness
+source scripts/evaluate-blue-green-release-manifest.sh
+```
+
+Blue-green manifests use the same **`services.<name>: true|false`** toggle model as standard mode. Skipped services are those set to `false` in the manifest.
+
+**Important:** Harness ShellScript steps must use **`shell: Bash`** (not `Sh`). The evaluation scripts re-exec with bash if needed.
 
 ## What to verify
 

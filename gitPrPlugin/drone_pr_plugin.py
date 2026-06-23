@@ -196,20 +196,24 @@ def build_standard_release_manifest_yaml(change_ticket: str, inputset_stems: Lis
     return "\n".join(lines) + "\n"
 
 
-def build_blue_green_services_manifest_yaml(change_ticket: str, service_entries: List[str]) -> str:
-    """Blue-green mode: changeTicket + services list (filenames with .yml extension)."""
+def build_blue_green_services_manifest_yaml(change_ticket: str, service_stems: List[str]) -> str:
+    """Blue-green mode: changeTicket + services map (each service: true by default)."""
     lines: List[str] = [
         f"changeTicket: {change_ticket}",
         "services:",
+        "  # Service stems; set to false in PR review to skip a service for this release.",
     ]
-    for entry in sorted(service_entries, key=lambda s: s.lower()):
-        lines.append(f"  - {entry}")
+    for stem in sorted(service_stems, key=lambda s: s.lower()):
+        k = yaml_manifest_key(stem)
+        lines.append(f"  {k}: true")
     return "\n".join(lines) + "\n"
 
 
-def service_entry_name(stem: str) -> str:
-    """Manifest list entries always use a .yml suffix."""
-    return f"{stem}.yml"
+def normalize_service_stem(name: str) -> str:
+    """Strip optional .yml/.yaml suffix from a manifest service key."""
+    if name.lower().endswith((".yaml", ".yml")):
+        return Path(name).stem
+    return name
 
 
 def _normalize_color(color: str) -> str:
@@ -266,12 +270,12 @@ def discover_blue_green_service_entries(
     enabled_service_bases: List[str],
 ) -> Tuple[List[str], List[str]]:
     """
-    Build offline and online service filename lists from scanned YAML files.
+    Build offline and online service stem lists from scanned YAML files.
 
     Matches:
-    - <service>_<color>.yml and <service>_dr_<color>.yml by filename stem
-    - offline/* input sets -> <service>_<offlineColor>.yml
-    - route-change/* input sets -> <service>_route_change.yml (online manifest)
+    - <service>_<color> and <service>_dr_<color> by filename stem
+    - offline/* input sets -> <service>_<offlineColor>
+    - route-change/* input sets -> <service>_route_change (online manifest)
     """
     offline_entries: Set[str] = set()
     online_entries: Set[str] = set()
@@ -283,25 +287,25 @@ def discover_blue_green_service_entries(
         if _stem_matches_dr_color(stem, offline_color) or _stem_matches_color(stem, offline_color):
             base = stem.rsplit("_dr_", 1)[0] if _stem_matches_dr_color(stem, offline_color) else stem.rsplit("_", 1)[0]
             if _service_base_allowed(base, enabled_service_bases):
-                offline_entries.add(service_entry_name(stem))
+                offline_entries.add(stem)
             continue
 
         if _stem_matches_dr_color(stem, online_color) or _stem_matches_color(stem, online_color):
             base = stem.rsplit("_dr_", 1)[0] if _stem_matches_dr_color(stem, online_color) else stem.rsplit("_", 1)[0]
             if _service_base_allowed(base, enabled_service_bases):
-                online_entries.add(service_entry_name(stem))
+                online_entries.add(stem)
             continue
 
         if _is_route_change_path(rel, stem):
             base = _infer_service_base_from_route_stem(stem) or stem
             if _service_base_allowed(base, enabled_service_bases):
-                online_entries.add(service_entry_name(f"{base}_route_change"))
+                online_entries.add(f"{base}_route_change")
             continue
 
         if _is_offline_path(rel):
             base = _infer_service_base_from_offline_stem(stem)
             if base and _service_base_allowed(base, enabled_service_bases):
-                offline_entries.add(service_entry_name(f"{base}_{offline_color}"))
+                offline_entries.add(f"{base}_{offline_color}")
 
     if not offline_entries:
         raise PluginError(
