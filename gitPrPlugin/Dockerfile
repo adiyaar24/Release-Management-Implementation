@@ -1,12 +1,15 @@
 FROM python:3.12-alpine
 
 LABEL maintainer="Elevance / Harness"
-LABEL description="Drone plugin: one PR per YAML under a path (newline append), branches release/<ticket>-<service>"
-LABEL version="1.0.0"
+LABEL description="Drone plugin: input set PR + release manifest (standard or blue-green mode)"
+LABEL version="1.1.0"
 
 RUN apk add --no-cache git
 
 WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY drone_pr_plugin.py ./
 

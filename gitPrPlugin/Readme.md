@@ -1,45 +1,120 @@
-# Drone plugin: multi-branch YAML + pull requests
+# Drone plugin: single-branch input set PR + release manifest
 
-The plugin **clones** your repo, **edits** each `.yaml` / `.yml` under a path, **pushes** one topic branch per file, then **creates a pull request** per branch.
+The plugin **clones** your repo, **edits** each `.yaml` / `.yml` under a path, writes **release manifest(s)**, pushes **one topic branch** per change ticket, then opens **one pull request** (Harness Code or GitHub API).
 
 - **Git** (clone, commit, push) works with any remote, same idea as **`drone_git_plugin.py`** (Commit To Git).
-- **PR creation** uses a **Host API** (not git): **Harness Code** (default when Harness settings are set), **GitHub**, or **Bitbucket Cloud** (`api.bitbucket.org`). Set `PLUGIN_PR_BACKEND=none` to only push branches. **Bitbucket Data Center / Server** uses a different API and is not covered here.
+- **PR creation** uses **Harness Code** or **GitHub** REST API. Set `PLUGIN_PR_BACKEND=none` to push the branch only.
 
-## What each PR changes
+## Plugin modes (`PLUGIN_MODE`)
 
-At the **end of each touched YAML file** the plugin appends a **comment line** (and a trailing newline). Default text:
+| Mode | Default | Manifest output |
+|------|---------|-----------------|
+| `standard` | **yes** | `release-manifest-<ticket>.yaml` at repo root |
+| `blue-green` | no | `release-<ticket>/offline-<offlineColor>-services.yml` and `online-<onlineColor>-services.yml` |
+
+### Standard mode
+
+1. Appends a **marker comment** at the end of every YAML file under `PLUGIN_HARNESS_PATH` (default `.harness`).
+2. Creates **`release-manifest-<ticket>.yaml`** at the repository root:
+
+```yaml
+ChangeTicket: CHG-001
+services:
+  env-inputSetService1: true
+  env-inputSetService2: true
+```
+
+3. Commits everything on branch **`release/<ticket>`** and opens **one PR** into the base branch.
+
+### Blue-green mode
+
+Same marker comment + input-set value filling, plus a **`release-<ticket>/`** directory:
+
+```
+release-CHG0000001/
+├── offline-blue-services.yml
+└── online-green-services.yml
+```
+
+**`offline-blue-services.yml`**
+
+```yaml
+changeTicket: CHG0000001
+services:
+  nginx_blue: true
+  alpine_blue: true
+  service1_dr_blue: true
+```
+
+**`online-green-services.yml`** (preferred — flat map, no list dashes)
+
+```yaml
+changeTicket: CHG0000002
+services:
+  service1_goldtier_green: true
+  service1_goldtier_dr_green: true
+  nginx_route_change: true
+  alpine_route_change: true
+```
+
+List-of-maps format (`- service: true`) is also accepted by the evaluation script, but the plugin generates the flat map above.
+
+Each service defaults to `true`. Set a service to `false` in the PR review to skip it for that release (same toggle model as standard mode).
+
+Service discovery scans `PLUGIN_HARNESS_PATH` recursively:
+
+| Pattern | Offline manifest | Online manifest |
+|---------|------------------|-----------------|
+| `<service>_<offlineColor>.yml` | yes | |
+| `<service>_dr_<offlineColor>.yml` | yes | |
+| `<service>_<onlineColor>.yml` | | yes |
+| `<service>_dr_<onlineColor>.yml` | | yes |
+| `offline/*` input sets (e.g. `nginx_offline_deploy.yaml`) | maps to `nginx_<offlineColor>.yml` | |
+| `route-change/*` input sets | | maps to `<service>_route_change.yml` |
+
+Use **`PLUGIN_SERVICE_BASES`** (comma-separated, e.g. `nginx,alpine`) to limit which microservices are included.
+
+Default marker comment (override with `PLUGIN_CHANGE_COMMENT_LINE`):
 
 ```text
 # Remove this comment post your chnges are done , this was created as part of auto creation of PR for easier view
 ```
 
-Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with `#`, a `#` prefix is added for YAML).
-
 ## Branches and base
 
 - **Base branch:** `main` by default (`PLUGIN_BASE_BRANCH`).
-- **Topic branch:** `release/<change-ticket>-<service>` (e.g. `service1.yaml` + `CHG-001` → `release/CHG-001-service1`).
+- **Topic branch:** `release/<change-ticket>` (e.g. `CHG-001` → `release/CHG-001`).
 
 ## PR backend selection
 
 | `PLUGIN_PR_BACKEND` | Behavior |
 |----------------------|----------|
-| *(unset)* | **Auto:** if Harness API settings are present → **harness**; if `github.com` in `PLUGIN_REPO_URL` → **github**; if `bitbucket.org` → **bitbucket**; otherwise the run **fails** with a hint to set backend or vars. |
+| *(unset)* | **Auto:** Harness API settings present → **harness**; `github.com` in URL → **github**; else fail with hint |
 | `harness` | Harness Code REST API (`x-api-key`). |
 | `github` | GitHub REST API (`Bearer` token). |
-| `bitbucket` | Bitbucket **Cloud** REST API 2.0 (OAuth2 **Bearer** or HTTP Basic with app password). |
-| `none` | Push branches only; **no** PR API calls. |
+| `none` | Push branch only; **no** PR API call. |
 
 ## Environment variables
 
-### Required (always)
+### Required
 
 | Variable | Description |
 |----------|-------------|
 | `PLUGIN_REPO_URL` | Clone URL (`https://...` or `git@...`). |
-| `PLUGIN_CHANGE_TICKET` | Change id for branch names, e.g. `CHG-001`. |
+| `PLUGIN_CHANGE_TICKET` | Change id for branch + manifest, e.g. `CHG-001`. |
 
-### Git (same pattern as Commit To Git)
+### Mode and blue-green
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLUGIN_MODE` | `standard` | `standard` or `blue-green`. |
+| `PLUGIN_OFFLINE_COLOR` | `blue` | Offline color for blue-green manifests and input-set filling. |
+| `PLUGIN_ONLINE_COLOR` | `green` | Online color for blue-green manifests and input-set filling. |
+| `PLUGIN_ONLINE_CHANGE_TICKET` | same as `PLUGIN_CHANGE_TICKET` | `changeTicket` in online manifest and route-change input sets. |
+| `PLUGIN_RELEASE_VERSION` | *(empty)* | Sets `releaseVersion` in offline input sets when present. |
+| `PLUGIN_SERVICE_BASES` | *(empty)* | Comma-separated microservice bases to include (e.g. `nginx,alpine`). |
+
+### Git
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -51,51 +126,37 @@ Override with **`PLUGIN_CHANGE_COMMENT_LINE`** (if the value does not start with
 | `PLUGIN_WORK_DIR` | `/harness` | Parent directory for the clone. |
 | `PLUGIN_GIT_AUTHOR_NAME` | `Drone PR Plugin` | Commit author name. |
 | `PLUGIN_GIT_AUTHOR_EMAIL` | `drone-pr-plugin@local` | Commit author email. |
-| `PLUGIN_PR_TITLE_TEMPLATE` | `[{ticket}] {service} harness update` | PR title; `{ticket}`, `{service}`, `{path}`. |
+| `PLUGIN_PR_TITLE_TEMPLATE` | `InputSets for the release of change ticket {ticket}` | PR title; `{ticket}`, `{service}`, `{path}`. |
 | `PLUGIN_CHANGE_COMMENT_LINE` | *(see default above)* | Marker line appended at bottom of each YAML. |
 
-### Harness Code PR API (when backend is harness)
+### Harness Code PR API
 
 | Variable | Description |
 |----------|-------------|
-| `PLUGIN_HARNESS_API_KEY` | Harness **API key** (`x-api-key` header). Not necessarily the same as the git password. |
-| `PLUGIN_HARNESS_REPO_IDENTIFIER` | Path segment `repo_identifier` for `POST /code/api/v1/repos/{repo_identifier}/pullreq`. |
+| `PLUGIN_HARNESS_API_KEY` | Harness API key (`x-api-key`). |
+| `PLUGIN_HARNESS_REPO_IDENTIFIER` | Repo identifier for `POST .../pullreq`. |
 | `PLUGIN_HARNESS_ACCOUNT_IDENTIFIER` | Query `accountIdentifier` (**required**). |
 | `PLUGIN_HARNESS_ORG_IDENTIFIER` | Query `orgIdentifier` (optional). |
 | `PLUGIN_HARNESS_PROJECT_IDENTIFIER` | Query `projectIdentifier` (optional). |
-| `PLUGIN_HARNESS_PLATFORM_URL` | Default `https://app.harness.io`. Use your Harness / vanity URL if different. |
+| `PLUGIN_HARNESS_PLATFORM_URL` | Default `https://app.harness.io`. |
 
-### GitHub PR API (when backend is github)
+### GitHub PR API
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PLUGIN_GITHUB_TOKEN` | falls back to `PLUGIN_GIT_TOKEN` | PAT with `repo` + PR scope. |
 | `PLUGIN_GITHUB_API_URL` | `https://api.github.com` | GitHub Enterprise API root if needed. |
 
-### Bitbucket Cloud PR API (when backend is bitbucket)
-
-Workspace and repository slug are parsed from `https://bitbucket.org/<workspace>/<repo_slug>` or `git@bitbucket.org:...` when possible. If your clone URL is not on `bitbucket.org`, set **`PLUGIN_BITBUCKET_WORKSPACE`** and **`PLUGIN_BITBUCKET_REPO_SLUG`** and use **`PLUGIN_PR_BACKEND=bitbucket`**.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PLUGIN_BITBUCKET_API_URL` | `https://api.bitbucket.org/2.0` | Bitbucket Cloud API root (change only if Atlassian documents a different base). |
-| `PLUGIN_BITBUCKET_WORKSPACE` | *(empty)* | Overrides workspace segment when not inferable from `PLUGIN_REPO_URL`. |
-| `PLUGIN_BITBUCKET_REPO_SLUG` | *(empty)* | Overrides repo slug when not inferable from `PLUGIN_REPO_URL`. |
-| `PLUGIN_BITBUCKET_ACCESS_TOKEN` | *(empty)* | OAuth2 access token → **`Authorization: Bearer`**. |
-| `PLUGIN_BITBUCKET_USERNAME` | falls back to `PLUGIN_GIT_USERNAME` | Bitbucket account username (for HTTP Basic with app password). |
-| `PLUGIN_BITBUCKET_APP_PASSWORD` | falls back to `PLUGIN_GIT_TOKEN` | App password for Basic auth (same value often works for HTTPS git + REST). |
-
-Either **`PLUGIN_BITBUCKET_ACCESS_TOKEN`**, or **username + app password** (including via git vars above), is required.
-
 ### Drone outputs (`DRONE_OUTPUT`)
 
-- `executionStatus`, `repoUrl`, `prBackend`
-- `pushedBranches` — JSON array of branch names
+- `executionStatus`, `repoUrl`, `prBackend`, `pluginMode`
+- `pushedBranches` — JSON array (one branch)
 - `branchCount`
-- `pullRequestUrls` — JSON array (GitHub **html_url** when available; Harness often has no URL in API response)
-- `pullRequestDetails` — JSON array of per-PR metadata from the API
-
-If `DRONE_OUTPUT` is unset, outputs append to `/tmp/DRONE_OUTPUT`.
+- `pullRequestUrls` — JSON array
+- `pullRequestDetails` — JSON array of PR metadata
+- `changeTicket`, `offlineColor`, `onlineColor`
+- `manifestServices` — JSON array of manifest service entries
+- `releaseManifestYamlJson` — JSON-escaped manifest content
 
 ## Build
 
@@ -103,96 +164,85 @@ If `DRONE_OUTPUT` is unset, outputs append to `/tmp/DRONE_OUTPUT`.
 docker build -t your-registry/drone-pr-plugin:1.0.0 .
 ```
 
-## Test locally
-
-The plugin hits your **real Git remote** and **real PR APIs**. Use a **throwaway repo** and **test credentials**.
-
-### SSH / HTTPS
-
-For HTTPS private repos, set `PLUGIN_GIT_USERNAME` and `PLUGIN_GIT_TOKEN`. For `git@...`, ensure SSH keys/agent work in that shell or Docker container.
-
-### Example: Harness Code
-
-```bash
-cd /path/to/gitPrCreation
-
-export PLUGIN_REPO_URL="https://git.harness.io/your-org/your-repo.git"
-export PLUGIN_CHANGE_TICKET="CHG-TEST-001"
-export PLUGIN_HARNESS_PATH=".harness"
-export PLUGIN_BASE_BRANCH="main"
-export PLUGIN_GIT_USERNAME="..."
-export PLUGIN_GIT_TOKEN="..."
-
-export PLUGIN_PR_BACKEND="harness"
-export PLUGIN_HARNESS_PLATFORM_URL="https://app.harness.io"
-export PLUGIN_HARNESS_API_KEY="pat_or_api_key_from_harness"
-export PLUGIN_HARNESS_REPO_IDENTIFIER="your/repo/identifier"
-export PLUGIN_HARNESS_ACCOUNT_IDENTIFIER="your_account_id"
-export PLUGIN_HARNESS_ORG_IDENTIFIER=""
-export PLUGIN_HARNESS_PROJECT_IDENTIFIER=""
-
-export PLUGIN_WORK_DIR="/tmp/pr-plugin-work"
-export DRONE_OUTPUT="/tmp/drone-pr-plugin-test.out"
-
-python3 drone_pr_plugin.py
-cat /tmp/drone-pr-plugin-test.out
-```
-
-### Example: GitHub
-
-```bash
-export PLUGIN_REPO_URL="https://github.com/org/repo.git"
-export PLUGIN_CHANGE_TICKET="CHG-TEST-001"
-export PLUGIN_GIT_USERNAME="x-access-token"
-export PLUGIN_GIT_TOKEN="ghp_..."
-export PLUGIN_GITHUB_TOKEN="$PLUGIN_GIT_TOKEN"
-export PLUGIN_PR_BACKEND="github"
-python3 drone_pr_plugin.py
-```
-
-### Docker
-
-Pass the same variables with `docker run -e ...`; mount a file for `DRONE_OUTPUT` if you want to inspect results.
-
-### What to verify
-
-- Branches exist: `release/<ticket>-<service>`.
-- Each YAML ends with the **marker comment** line.
-- PRs exist in Harness / GitHub for each branch into `PLUGIN_BASE_BRANCH`.
-
-## Drone step example (Harness)
+## Drone / Harness CI step example (blue-green)
 
 ```yaml
-steps:
-  - name: harness-prs-per-service
-    image: your-registry/drone-pr-plugin:1.0.0
-    environment:
-      PLUGIN_REPO_URL: https://git.harness.io/org/proj/repo.git
-      PLUGIN_CHANGE_TICKET: CHG-001
-      PLUGIN_HARNESS_PATH: .harness
-      PLUGIN_BASE_BRANCH: main
-      PLUGIN_GIT_USERNAME: git
-      PLUGIN_GIT_TOKEN:
-        from_secret: harness_git_token
-      PLUGIN_PR_BACKEND: harness
-      PLUGIN_HARNESS_PLATFORM_URL: https://app.harness.io
-      PLUGIN_HARNESS_API_KEY:
-        from_secret: harness_api_key
-      PLUGIN_HARNESS_REPO_IDENTIFIER: org/project/repo-id
-      PLUGIN_HARNESS_ACCOUNT_IDENTIFIER: accountId
-      PLUGIN_HARNESS_PROJECT_IDENTIFIER: projectId
+- step:
+    type: Plugin
+    name: Create Input Set PR
+    identifier: Create_InputSet_PR
+    spec:
+      connectorRef: account.dockerhub
+      image: your-registry/drone-pr-plugin:1.0.0
+      settings:
+        REPO_URL: https://git.harness.io/.../elevance-blue-green-solutioning.git
+        CHANGE_TICKET: <+pipeline.variables.offlineChangeTicket>
+        MODE: blue-green
+        OFFLINE_COLOR: <+pipeline.variables.offlineColor>
+        ONLINE_COLOR: <+pipeline.variables.onlineColor>
+        ONLINE_CHANGE_TICKET: <+pipeline.variables.onlineChangeTicket>
+        HARNESS_PATH: .harness
+        BASE_BRANCH: main
+        GIT_USERNAME: <account_or_user>
+        GIT_TOKEN: <+secrets.getValue("harness_git_token")>
+        PR_BACKEND: harness
+        HARNESS_API_KEY: <+secrets.getValue("harness_api_key")>
+        HARNESS_REPO_IDENTIFIER: elevance-blue-green-solutioning
+        HARNESS_ACCOUNT_IDENTIFIER: Npsd6WrETY-Baq6iHeOHGw
+        HARNESS_ORG_IDENTIFIER: default
+        HARNESS_PROJECT_IDENTIFIER: ElevanceHealth
 ```
 
-## Comparison to Commit To Git (`drone_git_plugin.py`)
+## Manifest evaluation scripts
 
-| | Commit To Git | This plugin |
-|--|----------------|-------------|
-| Git | Clone + push | Clone + push **topic branches** |
-| Remote change | JSON file → **main** | Marker comment on YAML → **PR** into base |
-| Extra | None | PR via **Harness or GitHub API** |
+After the PR is merged, a **ShellScript** step reads the manifest and exports the same outputs for both modes.
 
-## Notes
+| Script | Mode | Manifest path |
+|--------|------|----------------|
+| `scripts/evaluate-standard-release-manifest.sh` | `standard` | `release-manifest-<ticket>.yaml` |
+| `scripts/evaluate-blue-green-release-manifest.sh` | `blue-green` | `release-<ticket>/offline-<color>-services.yml` or `online-<color>-services.yml` |
 
-- **Harness `repo_identifier`:** take the value from Harness Code / API docs for your repository (not always the same string as the git URL).
-- Re-runs may **force-push** or update existing branch names depending on remote state; delete old branches if you need a clean retry.
-- Store API keys and git tokens in **Drone secrets**.
+Both export `ENABLED_SERVICES_JSON` and `SKIPPED_SERVICES_JSON` for downstream Harness steps.
+
+### Standard (your existing logic)
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.changeTicket>
+source scripts/evaluate-standard-release-manifest.sh
+```
+
+### Blue-green — offline deploy pipeline
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.offlineChangeTicket>
+ONLINE_CHANGE_TICKET=<+pipeline.variables.onlineChangeTicket>
+OFFLINE_COLOR=<+pipeline.variables.offlineColor>
+ONLINE_COLOR=<+pipeline.variables.onlineColor>
+RELEASE_PHASE=offline
+HARNESS_PATH=.harness
+source scripts/evaluate-blue-green-release-manifest.sh
+```
+
+### Blue-green — route-change pipeline
+
+```bash
+CHANGE_TICKET=<+pipeline.variables.offlineChangeTicket>
+ONLINE_CHANGE_TICKET=<+pipeline.variables.onlineChangeTicket>
+OFFLINE_COLOR=<+pipeline.variables.offlineColor>
+ONLINE_COLOR=<+pipeline.variables.onlineColor>
+RELEASE_PHASE=online
+HARNESS_PATH=.harness
+source scripts/evaluate-blue-green-release-manifest.sh
+```
+
+Blue-green manifests use the same **`services.<name>: true|false`** toggle model as standard mode. Skipped services are those set to `false` in the manifest.
+
+**Important:** Harness ShellScript steps must use **`shell: Bash`** (not `Sh`). The evaluation scripts re-exec with bash if needed.
+
+## What to verify
+
+- Branch exists: `release/<ticket>`.
+- **Standard:** root file `release-manifest-<ticket>.yaml` lists all input sets in scope.
+- **Blue-green:** folder `release-<ticket>/` with `offline-<color>-services.yml` and `online-<color>-services.yml`.
+- Each input set YAML ends with the marker comment line.
+- **One** PR exists in Harness Code / GitHub for the branch into `main`.

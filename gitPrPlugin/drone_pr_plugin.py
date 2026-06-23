@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """
-Drone plugin: clone a repo, append a marker comment to each YAML under a path, add
-release-manifest-<ticket>.yaml, push one topic branch for the change ticket, then
+Drone plugin: clone a repo, append a marker comment to each YAML under a path,
+write release manifest(s), push one topic branch for the change ticket, then
 open a single pull request (Harness Code or GitHub API).
+
+PLUGIN_MODE:
+  standard (default) — release-manifest-<ticket>.yaml at repo root
+  blue-green         — release-<ticket>/offline-<color>-services.yml and
+                       online-<color>-services.yml
 """
 
 import json
 import logging
 import os
 import re
-from collections import Counter
+import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, urlencode, urlparse
-import shutil
+
+import yaml
 
 
 class PluginError(Exception):
@@ -74,6 +81,78 @@ def append_comment_line(text: str, comment_line: str) -> str:
     return text + comment_line.strip() + "\n"
 
 
+def strip_marker_lines(text: str, marker_line: str) -> str:
+    """Remove any existing marker lines to keep diffs idempotent-ish."""
+    m = marker_line.strip()
+    lines = text.splitlines()
+    kept = [ln for ln in lines if ln.strip() != m]
+    out = "\n".join(kept).rstrip("\n")
+    return out + ("\n" if out else "")
+
+
+def update_input_set_yaml_values(yaml_obj: Any, rel_path: str, cfg: Dict[str, Any]) -> bool:
+    """
+    Update Harness InputSet YAML values based on file location.
+
+    Conventions:
+    - offline/*: set changeTicket and offlineColor (+ releaseVersion if provided)
+    - route-change/*: set changeTicket, fromColor, toColor
+    """
+    if not isinstance(yaml_obj, dict):
+        return False
+
+    input_set = yaml_obj.get("inputSet") if "inputSet" in yaml_obj else yaml_obj
+    if not isinstance(input_set, dict):
+        return False
+
+    pipeline = input_set.get("pipeline")
+    if not isinstance(pipeline, dict):
+        return False
+
+    variables = pipeline.get("variables")
+    if not isinstance(variables, list):
+        return False
+
+    rel_norm = rel_path.replace("\\", "/")
+    is_offline = "/offline/" in rel_norm or rel_norm.endswith("/offline")
+    is_route = (
+        "/route-change/" in rel_norm
+        or "/route_change/" in rel_norm
+        or "/route-change" in rel_norm
+    )
+
+    if not is_offline and not is_route:
+        return False
+
+    change_ticket_value = cfg["ticket"] if is_offline else cfg.get("online_ticket") or cfg["ticket"]
+    offline_color = cfg["offline_color"]
+    online_color = cfg["online_color"]
+    release_version = cfg.get("release_version") or ""
+
+    updated = False
+    for v in variables:
+        if not isinstance(v, dict):
+            continue
+        name = str(v.get("name") or "")
+        if name == "changeTicket":
+            v["value"] = str(change_ticket_value)
+            updated = True
+        elif name == "offlineColor" and is_offline:
+            v["value"] = str(offline_color)
+            updated = True
+        elif name == "fromColor" and is_route:
+            v["value"] = str(online_color)
+            updated = True
+        elif name == "toColor" and is_route:
+            v["value"] = str(offline_color)
+            updated = True
+        elif name == "releaseVersion" and release_version:
+            v["value"] = str(release_version)
+            updated = True
+
+    return updated
+
+
 def slug_for_branch(name: str) -> str:
     """Git branch segment: alphanumeric, dot, underscore, hyphen."""
     s = re.sub(r"[^a-zA-Z0-9._-]+", "-", name.strip())
@@ -85,6 +164,18 @@ def release_manifest_filename(ticket_part: str) -> str:
     return f"release-manifest-{ticket_part}.yaml"
 
 
+def release_dir_name(ticket_part: str) -> str:
+    return f"release-{ticket_part}"
+
+
+def offline_services_filename(color: str) -> str:
+    return f"offline-{color}-services.yml"
+
+
+def online_services_filename(color: str) -> str:
+    return f"online-{color}-services.yml"
+
+
 def yaml_manifest_key(stem: str) -> str:
     """Quote YAML mapping key when the stem is not a plain unquoted token."""
     if re.fullmatch(r"[A-Za-z0-9_.-]+", stem):
@@ -92,8 +183,8 @@ def yaml_manifest_key(stem: str) -> str:
     return json.dumps(stem)
 
 
-def build_release_manifest_yaml(change_ticket: str, inputset_stems: List[str]) -> str:
-    """release-manifest content: ChangeTicket and services (one key per input set stem)."""
+def build_standard_release_manifest_yaml(change_ticket: str, inputset_stems: List[str]) -> str:
+    """Standard mode: ChangeTicket and services (one key per input set stem)."""
     lines: List[str] = [
         f"ChangeTicket: {change_ticket}",
         "services:",
@@ -103,6 +194,131 @@ def build_release_manifest_yaml(change_ticket: str, inputset_stems: List[str]) -
         k = yaml_manifest_key(stem)
         lines.append(f"  {k}: true")
     return "\n".join(lines) + "\n"
+
+
+def build_blue_green_services_manifest_yaml(change_ticket: str, service_stems: List[str]) -> str:
+    """Blue-green mode: changeTicket + services map (each service: true by default)."""
+    lines: List[str] = [
+        f"changeTicket: {change_ticket}",
+        "services:",
+        "  # Service stems; set to false in PR review to skip a service for this release.",
+    ]
+    for stem in sorted(service_stems, key=lambda s: s.lower()):
+        k = yaml_manifest_key(stem)
+        lines.append(f"  {k}: true")
+    return "\n".join(lines) + "\n"
+
+
+def normalize_service_stem(name: str) -> str:
+    """Strip optional .yml/.yaml suffix from a manifest service key."""
+    if name.lower().endswith((".yaml", ".yml")):
+        return Path(name).stem
+    return name
+
+
+def _normalize_color(color: str) -> str:
+    return color.strip().lower()
+
+
+def _stem_matches_dr_color(stem: str, color: str) -> bool:
+    return stem.lower().endswith(f"_dr_{_normalize_color(color)}")
+
+
+def _stem_matches_color(stem: str, color: str) -> bool:
+    suffix = f"_{_normalize_color(color)}"
+    return stem.lower().endswith(suffix) and not _stem_matches_dr_color(stem, color)
+
+
+def _is_route_change_path(rel_path: str, stem: str) -> bool:
+    rel_norm = rel_path.replace("\\", "/").lower()
+    return (
+        "_route_change" in stem.lower()
+        or "/route-change/" in rel_norm
+        or "/route_change/" in rel_norm
+    )
+
+
+def _is_offline_path(rel_path: str) -> bool:
+    rel_norm = rel_path.replace("\\", "/").lower()
+    return "/offline/" in rel_norm or rel_norm.endswith("/offline")
+
+
+def _service_base_allowed(service_base: str, enabled_bases: List[str]) -> bool:
+    if not enabled_bases:
+        return True
+    return service_base.lower() in {b.lower() for b in enabled_bases}
+
+
+def _infer_service_base_from_offline_stem(stem: str) -> Optional[str]:
+    for suffix in ("_offline_deploy", "_offline", "_deploy"):
+        if stem.lower().endswith(suffix):
+            return stem[: -len(suffix)].rstrip("_")
+    return None
+
+
+def _infer_service_base_from_route_stem(stem: str) -> Optional[str]:
+    if stem.lower().endswith("_route_change"):
+        return stem[: -len("_route_change")].rstrip("_")
+    return None
+
+
+def discover_blue_green_service_entries(
+    yaml_files: List[Path],
+    repo_path: Path,
+    offline_color: str,
+    online_color: str,
+    enabled_service_bases: List[str],
+) -> Tuple[List[str], List[str]]:
+    """
+    Build offline and online service stem lists from scanned YAML files.
+
+    Matches:
+    - <service>_<color> and <service>_dr_<color> by filename stem
+    - offline/* input sets -> <service>_<offlineColor>
+    - route-change/* input sets -> <service>_route_change (online manifest)
+    """
+    offline_entries: Set[str] = set()
+    online_entries: Set[str] = set()
+
+    for ypath in yaml_files:
+        rel = ypath.relative_to(repo_path).as_posix()
+        stem = ypath.stem
+
+        if _stem_matches_dr_color(stem, offline_color) or _stem_matches_color(stem, offline_color):
+            base = stem.rsplit("_dr_", 1)[0] if _stem_matches_dr_color(stem, offline_color) else stem.rsplit("_", 1)[0]
+            if _service_base_allowed(base, enabled_service_bases):
+                offline_entries.add(stem)
+            continue
+
+        if _stem_matches_dr_color(stem, online_color) or _stem_matches_color(stem, online_color):
+            base = stem.rsplit("_dr_", 1)[0] if _stem_matches_dr_color(stem, online_color) else stem.rsplit("_", 1)[0]
+            if _service_base_allowed(base, enabled_service_bases):
+                online_entries.add(stem)
+            continue
+
+        if _is_route_change_path(rel, stem):
+            base = _infer_service_base_from_route_stem(stem) or stem
+            if _service_base_allowed(base, enabled_service_bases):
+                online_entries.add(f"{base}_route_change")
+            continue
+
+        if _is_offline_path(rel):
+            base = _infer_service_base_from_offline_stem(stem)
+            if base and _service_base_allowed(base, enabled_service_bases):
+                offline_entries.add(f"{base}_{offline_color}")
+
+    if not offline_entries:
+        raise PluginError(
+            f"No offline services found for color '{offline_color}'. "
+            "Expected filenames ending with _<color> or _dr_<color>, or input sets under offline/."
+        )
+    if not online_entries:
+        raise PluginError(
+            f"No online services found for color '{online_color}' or route-change input sets. "
+            "Expected filenames ending with _<color>, _dr_<color>, or route-change/ input sets."
+        )
+
+    return sorted(offline_entries), sorted(online_entries)
 
 
 def discover_yaml_files(root: Path, relative_dir: str) -> List[Path]:
@@ -232,7 +448,6 @@ def resolve_pr_backend(cfg: Dict[str, Any]) -> str:
         return "github"
     if explicit == "harness":
         return "harness"
-    # Auto-detect when PLUGIN_PR_BACKEND is unset
     harness_ready = (
         cfg.get("harness_api_key")
         and cfg.get("harness_repo_identifier")
@@ -254,6 +469,15 @@ def resolve_pr_backend(cfg: Dict[str, Any]) -> str:
 def load_config() -> Dict[str, Any]:
     repo_url = os.environ.get("PLUGIN_REPO_URL", "").strip()
     ticket = os.environ.get("PLUGIN_CHANGE_TICKET", "").strip()
+    mode = os.environ.get("PLUGIN_MODE", "standard").strip().lower() or "standard"
+    online_ticket = os.environ.get("PLUGIN_ONLINE_CHANGE_TICKET", "").strip()
+    offline_color = os.environ.get("PLUGIN_OFFLINE_COLOR", "blue").strip() or "blue"
+    online_color = os.environ.get("PLUGIN_ONLINE_COLOR", "green").strip() or "green"
+    release_version = os.environ.get("PLUGIN_RELEASE_VERSION", "").strip()
+    service_bases_csv = os.environ.get("PLUGIN_SERVICE_BASES", "").strip()
+    enabled_service_bases = (
+        [s.strip() for s in service_bases_csv.split(",") if s.strip()] if service_bases_csv else []
+    )
     harness_path = os.environ.get("PLUGIN_HARNESS_PATH", ".harness").strip() or ".harness"
     base_branch = os.environ.get("PLUGIN_BASE_BRANCH", "main").strip() or "main"
     branch_prefix = os.environ.get("PLUGIN_BRANCH_PREFIX", "release").strip() or "release"
@@ -285,10 +509,20 @@ def load_config() -> Dict[str, Any]:
         raise PluginError("PLUGIN_REPO_URL is required")
     if not ticket:
         raise PluginError("PLUGIN_CHANGE_TICKET is required (e.g. CHG-001)")
+    if mode not in ("standard", "blue-green", "blue_green"):
+        raise PluginError("PLUGIN_MODE must be 'standard' or 'blue-green'")
+    if mode in ("blue-green", "blue_green"):
+        mode = "blue-green"
 
     cfg = {
         "repo_url": repo_url,
         "ticket": ticket,
+        "mode": mode,
+        "online_ticket": online_ticket or ticket,
+        "offline_color": offline_color,
+        "online_color": online_color,
+        "release_version": release_version,
+        "enabled_service_bases": enabled_service_bases,
         "harness_path": harness_path,
         "base_branch": base_branch,
         "branch_prefix": branch_prefix,
@@ -335,6 +569,7 @@ def main() -> int:
     try:
         cfg = load_config()
         backend = str(cfg["resolved_pr_backend"])
+        mode = str(cfg["mode"])
         clone_url = authenticated_clone_url(
             str(cfg["repo_url"]), str(cfg["username"]), str(cfg["token"])
         )
@@ -362,7 +597,7 @@ def main() -> int:
         if repo_path.exists():
             shutil.rmtree(repo_path)
 
-        logger.info("Cloning repository")
+        logger.info("Cloning repository (mode=%s)", mode)
         subprocess.run(
             ["git", "clone", clone_url, str(repo_path)],
             capture_output=True,
@@ -387,21 +622,35 @@ def main() -> int:
 
         ticket_part = slug_for_branch(str(cfg["ticket"]))
         branch = f"{cfg['branch_prefix']}/{ticket_part}"
-        manifest_name = release_manifest_filename(ticket_part)
-        manifest_rel = manifest_name
+
+        manifest_paths: List[str] = []
+        manifest_yaml: str = ""
+        manifest_services: List[str] = []
+
+        if mode == "blue-green":
+            release_dir = release_dir_name(ticket_part)
+            offline_manifest = offline_services_filename(str(cfg["offline_color"]))
+            online_manifest = online_services_filename(str(cfg["online_color"]))
+            offline_rel = f"{release_dir}/{offline_manifest}"
+            online_rel = f"{release_dir}/{online_manifest}"
+            manifest_paths = [offline_rel, online_rel]
+        else:
+            manifest_name = release_manifest_filename(ticket_part)
+            manifest_paths = [manifest_name]
 
         title = str(cfg["title_tmpl"]).format(
             ticket=str(cfg["ticket"]),
-            service="",  # unused in default template; kept for custom templates
-            path="",  # unused in default template
+            service="",
+            path="",
         )
 
         file_list = "\n".join(
             f"- `{p.relative_to(repo_path).as_posix()}`" for p in yaml_files
         )
+        manifest_list = "\n".join(f"- `{m}`" for m in manifest_paths)
         description = (
-            f"Automated PR for change **{cfg['ticket']}**.\n\n"
-            f"- Manifest: `{manifest_rel}`\n"
+            f"Automated PR for change **{cfg['ticket']}** (mode: `{mode}`).\n\n"
+            f"- Manifest(s):\n{manifest_list}\n"
             f"- Branch: `{branch}`\n"
             f"- Base: `{cfg['base_branch']}`\n\n"
             f"**Updated YAML files:**\n\n{file_list}\n"
@@ -413,7 +662,6 @@ def main() -> int:
             ["checkout", "-B", str(cfg["base_branch"]), f"origin/{cfg['base_branch']}"],
             repo_path,
         )
-
         run_git(["checkout", "-b", branch], repo_path)
 
         stem_counts = Counter(p.stem for p in yaml_files)
@@ -431,24 +679,65 @@ def main() -> int:
             rel_paths.append(rel)
             stems.append(manifest_key_for(ypath))
             raw = ypath.read_text(encoding="utf-8")
+            raw = strip_marker_lines(raw, str(cfg["comment_line"]))
+            updated_text = raw
+            if mode == "blue-green":
+                try:
+                    yaml_obj = yaml.safe_load(raw)
+                    if update_input_set_yaml_values(yaml_obj, rel, cfg):
+                        updated_text = yaml.safe_dump(
+                            yaml_obj,
+                            sort_keys=False,
+                            default_flow_style=False,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed YAML parse/update for %s (keeping original content)",
+                        rel,
+                        exc_info=True,
+                    )
             ypath.write_text(
-                append_comment_line(raw, str(cfg["comment_line"])),
+                append_comment_line(updated_text, str(cfg["comment_line"])),
                 encoding="utf-8",
             )
 
-        manifest_path = repo_path / manifest_name
-        manifest_path.write_text(
-            build_release_manifest_yaml(str(cfg["ticket"]), stems),
-            encoding="utf-8",
-        )
+        if mode == "blue-green":
+            offline_entries, online_entries = discover_blue_green_service_entries(
+                yaml_files,
+                repo_path,
+                str(cfg["offline_color"]),
+                str(cfg["online_color"]),
+                list(cfg.get("enabled_service_bases") or []),
+            )
+            release_dir_path = repo_path / release_dir_name(ticket_part)
+            release_dir_path.mkdir(parents=True, exist_ok=True)
+
+            offline_yaml = build_blue_green_services_manifest_yaml(
+                str(cfg["ticket"]), offline_entries
+            )
+            online_yaml = build_blue_green_services_manifest_yaml(
+                str(cfg.get("online_ticket") or cfg["ticket"]), online_entries
+            )
+            (release_dir_path / offline_services_filename(str(cfg["offline_color"]))).write_text(
+                offline_yaml, encoding="utf-8"
+            )
+            (release_dir_path / online_services_filename(str(cfg["online_color"]))).write_text(
+                online_yaml, encoding="utf-8"
+            )
+            manifest_services = offline_entries + online_entries
+            manifest_yaml = offline_yaml + "\n---\n" + online_yaml
+        else:
+            manifest_name = manifest_paths[0]
+            manifest_yaml = build_standard_release_manifest_yaml(str(cfg["ticket"]), stems)
+            manifest_services = stems
+            (repo_path / manifest_name).write_text(manifest_yaml, encoding="utf-8")
 
         for rel in rel_paths:
             run_git(["add", rel], repo_path)
-        run_git(["add", manifest_rel], repo_path)
+        for manifest_rel in manifest_paths:
+            run_git(["add", manifest_rel], repo_path)
 
-        msg = (
-            f"{cfg['ticket']}: marker comments on input sets + {manifest_name}"
-        )
+        msg = f"{cfg['ticket']}: marker comments on input sets + {', '.join(manifest_paths)}"
         run_git(["commit", "-m", msg], repo_path)
 
         logger.info("Pushing branch %s", branch)
@@ -461,8 +750,6 @@ def main() -> int:
         )
         pushed_branches.append(branch)
 
-        pr_url = ""
-        pr_number: Optional[int] = None
         if backend == "none":
             logger.info("PLUGIN_PR_BACKEND=none: skipping PR creation")
         elif backend == "github" and gh_owner and gh_repo:
@@ -506,6 +793,7 @@ def main() -> int:
                     "title": pr.get("title"),
                     "source_branch": pr.get("source_branch"),
                     "target_branch": pr.get("target_branch"),
+                    "url": pr_url,
                 }
             )
             logger.info("Harness PR created: #%s %s", pr_number, title)
@@ -524,9 +812,15 @@ def main() -> int:
                 "pull_request_details": json.dumps(pr_records),
                 "repo_url": sanitize_repo_url_for_output(str(cfg["repo_url"])),
                 "pr_backend": backend,
+                "plugin_mode": mode,
+                "change_ticket": str(cfg["ticket"]),
+                "offline_color": str(cfg["offline_color"]),
+                "online_color": str(cfg["online_color"]),
+                "manifest_services": json.dumps(manifest_services),
+                "release_manifest_yaml_json": json.dumps(manifest_yaml),
             }
         )
-        logger.info("Done: %d branch(es), PR backend=%s", len(pushed_branches), backend)
+        logger.info("Done: %d branch(es), PR backend=%s, mode=%s", len(pushed_branches), backend, mode)
         return 0
 
     except PluginError as e:

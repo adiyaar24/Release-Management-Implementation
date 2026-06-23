@@ -1,2 +1,1 @@
-# Stdlib only (urllib, json, subprocess, pathlib).
-# Pin future deps here if added.
+PyYAML>=6.0.1
