@@ -1,0 +1,117 @@
+pipeline:
+  name: BG Deploy Offline Color
+  identifier: bg_deploy_offline_blue_green
+  orgIdentifier: default
+  projectIdentifier: ElevanceHealth
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  variables:
+    - name: changeTicket
+      type: String
+      value: <+input>
+      description: Offline ServiceNow change ticket number
+    - name: releaseVersion
+      type: String
+      value: <+input>
+      description: Artifact tag or release version
+    - name: offlineColor
+      type: String
+      value: <+input>
+      description: Target offline color (blue or green)
+    # Istio trafficRouting expects `destination.port` as a Harness expression value.
+    - name: nginxPort
+      type: Number
+      value: 80
+      description: Nginx container/service port exposed by the blue/green chart
+    - name: alpinePort
+      type: Number
+      value: 8080
+      description: Alpine container/service port exposed by the blue/green chart
+  stages:
+    - stage:
+        name: Deploy Offline Color
+        identifier: deploy_offline_color
+        type: Deployment
+        tags:
+          blue-Green: "true"
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: Blue_Green_ElevanceHealth
+          environment:
+            environmentRef: account.AWSISELab
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: AWSInfra
+          execution:
+            steps:
+              - step:
+                  name: Stage Deployment
+                  identifier: stageDeployment
+                  type: K8sBlueGreenDeploy
+                  timeout: 10m
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+                    trafficRouting:
+                      provider: istio
+                      spec:
+                        # VirtualService name (metadata.name) that Harness updates/merges.
+                        name: nginx-bluegreen-vs
+                        hosts:
+                          - "*"
+                        gateways:
+                          - mesh
+                        routes:
+                          - route:
+                              type: http
+                              name: route1
+                              rules:
+                                - rule:
+                                    type: uri
+                                    spec:
+                                      value: /
+                                      matchType: prefix
+                              destinations:
+                                - destination:
+                                    host: stable
+                                    weight: 100
+                                    port: <+pipeline.variables.nginxPort>
+                                - destination:
+                                    host: stage
+                                    weight: 0
+                                    port: <+pipeline.variables.nginxPort>
+                          - route:
+                              type: http
+                              name: route2
+                              rules:
+                                - rule:
+                                    type: uri
+                                    spec:
+                                      value: /alpine
+                                      matchType: prefix
+                              destinations:
+                                - destination:
+                                    host: stable
+                                    weight: 100
+                                    port: <+pipeline.variables.alpinePort>
+                                - destination:
+                                    host: stage
+                                    weight: 0
+                                    port: <+pipeline.variables.alpinePort>
+          rollbackSteps:
+            - step:
+                name: Swap primary with stage service
+                identifier: rollbackBgSwapServices
+                type: K8sBGSwapServices
+                timeout: 10m
+                spec:
+                  skipDryRun: false
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+        timeout: 10m

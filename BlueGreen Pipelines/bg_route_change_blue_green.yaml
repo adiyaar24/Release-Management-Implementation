@@ -1,0 +1,195 @@
+pipeline:
+  name: BG Route Change Swap
+  identifier: bg_route_change_blue_green
+  orgIdentifier: default
+  projectIdentifier: ElevanceHealth
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  variables:
+    - name: changeTicket
+      type: String
+      value: <+input>
+      description: Online ServiceNow change ticket number
+    # Kept for compatibility with the existing release orchestration/input-set schema.
+    # Native blue/green swap does not require these values directly.
+    - name: fromColor
+      type: String
+      value: <+input>
+      description: Current online color before swap
+    - name: toColor
+      type: String
+      value: <+input>
+      description: Target online color after swap
+    # Istio trafficRouting expects `destination.port` as a Harness expression value.
+    - name: nginxPort
+      type: Number
+      value: 80
+      description: Nginx container/service port exposed by the blue/green chart
+    - name: alpinePort
+      type: Number
+      value: 8080
+      description: Alpine container/service port exposed by the blue/green chart
+
+  stages:
+    # Step 1: scale up the stage service (offline->stage capacity) using native blue/green deploy.
+    - stage:
+        name: Route Change Stage Service Deployment
+        identifier: route_change_stage_deploy
+        type: Deployment
+        tags:
+          blue-Green: "true"
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: Blue_Green_ElevanceHealth
+          environment:
+            environmentRef: account.AWSISELab
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: AWSInfra
+          execution:
+            steps:
+              - step:
+                  name: Stage Deployment
+                  identifier: stageDeployment
+                  type: K8sBlueGreenDeploy
+                  timeout: 10m
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+                    trafficRouting:
+                      provider: istio
+                      spec:
+                        # VirtualService name (metadata.name) that Harness merges/creates.
+                        name: nginx-bluegreen-vs
+                        hosts:
+                          - "*"
+                        gateways:
+                          - mesh
+                        routes:
+                          - route:
+                              type: http
+                              name: route1
+                              rules:
+                                - rule:
+                                    type: uri
+                                    spec:
+                                      value: /
+                                      matchType: prefix
+                              destinations:
+                                - destination:
+                                    host: stable
+                                    weight: 100
+                                    port: <+pipeline.variables.nginxPort>
+                                - destination:
+                                    host: stage
+                                    weight: 0
+                                    port: <+pipeline.variables.nginxPort>
+                          - route:
+                              type: http
+                              name: route2
+                              rules:
+                                - rule:
+                                    type: uri
+                                    spec:
+                                      value: /alpine
+                                      matchType: prefix
+                              destinations:
+                                - destination:
+                                    host: stable
+                                    weight: 100
+                                    port: <+pipeline.variables.alpinePort>
+                                - destination:
+                                    host: stage
+                                    weight: 0
+                                    port: <+pipeline.variables.alpinePort>
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+        timeout: 10m
+
+    # Step 2: approval gate between scale up and native swap.
+    - stage:
+        name: Route Change Approval Gate
+        identifier: route_change_approval_gate
+        type: Approval
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Demo Online Change SNOW Approval stub
+                  identifier: routeChangeSnowApproval
+                  type: ShellScript
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "=== DEMO: ServiceNow connector not configured ==="
+                          echo "Simulating ServiceNowApproval before native route swap"
+                          echo "Ticket: <+pipeline.variables.changeTicket>"
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+
+    # Step 3: native route change (service swap) using Harness blue/green swap.
+    - stage:
+        name: Native Route Swap
+        identifier: route_change_swap
+        type: Deployment
+        tags:
+          blue-Green: "true"
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: Blue_Green_ElevanceHealth
+          environment:
+            environmentRef: account.AWSISELab
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: AWSInfra
+          execution:
+            steps:
+              - step:
+                  name: Stage Deployment
+                  identifier: stageDeployment
+                  type: K8sBlueGreenDeploy
+                  timeout: 10m
+                  spec:
+                    skipDryRun: false
+                    pruningEnabled: false
+              - step:
+                  name: Swap primary with stage service
+                  identifier: bgSwapServices
+                  type: K8sBGSwapServices
+                  timeout: 10m
+                  spec:
+                    skipDryRun: false
+          rollbackSteps:
+            - step:
+                name: Swap primary with stage service rollback
+                identifier: rollbackBgSwapServices
+                type: K8sBGSwapServices
+                timeout: 10m
+                spec:
+                  skipDryRun: false
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: StageRollback
+        timeout: 10m
+

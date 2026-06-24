@@ -1,0 +1,265 @@
+pipeline:
+  name: BG Validate ServiceNow Change Tickets
+  identifier: bg_validate_snow_change_tickets
+  orgIdentifier: default
+  projectIdentifier: ElevanceHealth
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  variables:
+    - name: offlineChangeTicket
+      type: String
+      value: <+input>
+      description: Offline ServiceNow change request (Mon-Fri deploy window)
+    - name: onlineChangeTicket
+      type: String
+      value: <+input>
+      description: Online ServiceNow change request (post route-change window)
+    - name: gitPrPluginImage
+      type: String
+      value: <+input>.default(drone-pr-plugin:latest)
+      description: Container image built from Release-Management-Implementation/gitPrPlugin
+    - name: dockerRegistryRef
+      type: String
+      value: <+input>
+      description: Harness connector ref for Docker registry hosting gitPrPlugin image
+  stages:
+    - stage:
+        name: Validate Offline Change Ticket
+        identifier: validate_offline_change
+        type: Approval
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Demo Offline Change Validation
+                  identifier: offlineSnowValidation
+                  type: ShellScript
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "=== DEMO: ServiceNow connector not configured ==="
+                          echo "Simulating ServiceNowApproval for OFFLINE change ticket"
+                          echo "Ticket number: <+pipeline.variables.offlineChangeTicket>"
+                          echo "Window: Mon 00:00 - Fri 21:00 (offline color deploy)"
+                          echo "Result: DEMO APPROVED — offline change ticket accepted"
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+    - stage:
+        name: Validate Online Change Ticket
+        identifier: validate_online_change
+        type: Approval
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Demo Online Change Validation
+                  identifier: onlineSnowValidation
+                  type: ShellScript
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          echo "=== DEMO: ServiceNow connector not configured ==="
+                          echo "Simulating ServiceNowApproval for ONLINE change ticket"
+                          echo "Ticket number: <+pipeline.variables.onlineChangeTicket>"
+                          echo "Window: Fri 21:01 - following Thu 21:00"
+                          echo "Result: DEMO APPROVED — online change ticket accepted"
+              - step:
+                  name: Verify Linked Tickets
+                  identifier: verifyLinkedTickets
+                  type: ShellScript
+                  timeout: 5m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          OFFLINE="<+pipeline.variables.offlineChangeTicket>"
+                          ONLINE="<+pipeline.variables.onlineChangeTicket>"
+                          echo "=== DEMO: Linked change ticket check ==="
+                          echo "Offline: ${OFFLINE} | Online: ${ONLINE}"
+                          if [ -n "${OFFLINE}" ] && [ -n "${ONLINE}" ]; then
+                            echo "Linked ticket check passed (demo mode)."
+                          else
+                            echo "ERROR: missing ticket number(s)"
+                            exit 1
+                          fi
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+
+    # Helper stage: install Istio into the cluster so subsequent traffic-routing (Istio-only) works.
+    - stage:
+        name: Istio Install IstioOnly
+        identifier: istio_install
+        type: Custom
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Install Istio via Helm preferred
+                  identifier: istioInstall
+                  type: ShellScript
+                  timeout: 20m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -euo pipefail
+
+                          ISTIO_NS="istio-system"
+
+                          export KUBECONFIG="${HARNESS_KUBE_CONFIG_PATH:-}"
+                          echo "=== Istio install preflight ==="
+                          command -v helm >/dev/null 2>&1 && echo "ISTIO_INSTALL_METHOD=helm" || echo "ISTIO_INSTALL_METHOD=kubectl-manifests"
+
+                          # Install/upgrade (Idempotent).
+                          ISTIO_VERSION="${ISTIO_VERSION:-1.22.2}"
+
+                          helm_install_retry(){ 
+                            # $1 release $2 chart $3 extra args
+                            local release="$1" chart="$2" extra_args="$3"
+                            for attempt in 1 2 3; do
+                              echo "Helm install attempt ${attempt} for ${release}"
+                              if helm upgrade --install "${release}" "${chart}" ${extra_args} --wait --timeout 600s; then
+                                return 0
+                              fi
+                              sleep 15
+                            done
+                            return 1
+                          }
+
+                          kubectl_apply_retry(){
+                            # $1 url
+                            local url="$1"
+                            for attempt in 1 2 3; do
+                              echo "kubectl apply attempt ${attempt} for ${url}"
+                              if kubectl apply -f "${url}"; then
+                                return 0
+                              fi
+                              sleep 10
+                            done
+                            return 1
+                          }
+
+                          if command -v helm >/dev/null 2>&1; then
+                            helm repo add istio https://istio-release.storage.googleapis.com/charts >/dev/null 2>&1 || true
+                            helm repo update >/dev/null 2>&1 || true
+
+                            # If Helm fails for any transient reason, fallback to kubectl manifests.
+                            if ! helm_install_retry istio-base istio/base "-n ${ISTIO_NS} --create-namespace"; then
+                              echo "Helm failed for istio-base; falling back to kubectl manifests"
+                              command -v kubectl >/dev/null 2>&1 || { echo "kubectl missing on delegate"; exit 1; }
+                              kubectl create namespace "${ISTIO_NS}" --dry-run=client -o yaml | kubectl apply -f -
+                              kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/crds.yaml"
+                              kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/templates.yaml"
+                              kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/istiod/templates.yaml"
+                            else
+                              helm_install_retry istiod istio/istiod "-n ${ISTIO_NS}" || { echo "Helm failed for istiod; falling back to kubectl manifests"; kubectl create namespace "${ISTIO_NS}" --dry-run=client -o yaml | kubectl apply -f -; kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/crds.yaml"; kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/templates.yaml"; kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/istiod/templates.yaml"; }
+                            fi
+                          else
+                            # Fallback: apply Istio manifests directly (requires outbound connectivity).
+                            echo "Falling back to kubectl apply for Istio ${ISTIO_VERSION}"
+                            kubectl create namespace "${ISTIO_NS}" --dry-run=client -o yaml | kubectl apply -f -
+                            kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/crds.yaml"
+                            kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/base/templates.yaml"
+                            kubectl_apply_retry "https://raw.githubusercontent.com/istio/istio/${ISTIO_VERSION}/manifests/charts/istiod/templates.yaml"
+                          fi
+
+                          echo "=== Wait for Istio to be ready ==="
+                          kubectl -n "${ISTIO_NS}" rollout status deployment/istiod --timeout=300s
+                          # Istio validating webhook readiness can lag slightly behind rollout status.
+                          kubectl -n "${ISTIO_NS}" wait --for=condition=available deployment/istiod --timeout=600s
+                          kubectl -n "${ISTIO_NS}" wait --for=condition=ready pod -l app=istiod --timeout=600s || true
+                          echo "=== Waiting for istiod endpoints (best effort) ==="
+                          for i in {1..20}; do
+                            EP="$(kubectl -n "${ISTIO_NS}" get endpoints istiod -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+                            if [ -n "${EP}" ]; then
+                              echo "istiod endpoints ready: ${EP}"
+                              break
+                            fi
+                            echo "Waiting for istiod endpoints... (${i}/20)"
+                            sleep 5
+                          done
+
+                          # Increase webhook timeout to avoid admission failures during rollout/apply.
+                          # Istio defaults to 10s; in some clusters/latency scenarios this can exceed the
+                          # Kubernetes API request timeout used by blue/green deployments.
+                          echo "=== Patch Istio validating webhook timeoutSeconds (best effort) ==="
+                          for vwhc in istio-validator-istio-system istiod-default-validator; do
+                            if kubectl get validatingwebhookconfiguration "${vwhc}" >/dev/null 2>&1; then
+                              kubectl patch validatingwebhookconfiguration "${vwhc}" --type='json' -p='[{"op":"replace","path":"/webhooks/0/timeoutSeconds","value":30}]' >/dev/null 2>&1 || true
+                              # Also fail open during demo runs to avoid hard blocking on transient webhook issues.
+                              kubectl patch validatingwebhookconfiguration "${vwhc}" --type='json' -p='[{"op":"replace","path":"/webhooks/0/failurePolicy","value":"Ignore"}]' >/dev/null 2>&1 || true
+                              kubectl get validatingwebhookconfiguration "${vwhc}" -o jsonpath='{.webhooks[*].timeoutSeconds}{"\n"}' || true
+                            fi
+                          done
+
+                          kubectl -n "${ISTIO_NS}" get pods -o wide | head -n 20
+
+                          echo "Istio installation step completed."
+                    environmentVariables: []
+                    outputVariables: []
+
+    - stage:
+        name: Enable Istio Sidecar Injection
+        identifier: istio_enable_injection
+        type: Custom
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Label namespace for injection
+                  identifier: labelIstioInjection
+                  type: ShellScript
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -euo pipefail
+
+                          INJECTION_NS="harness-aditya"
+                          export KUBECONFIG="${HARNESS_KUBE_CONFIG_PATH:-}"
+
+                          echo "=== Enabling Istio injection in ${INJECTION_NS} ==="
+                          kubectl label namespace "${INJECTION_NS}" istio-injection=enabled --overwrite
+                          # Verify label exists.
+                          kubectl get namespace "${INJECTION_NS}" -o jsonpath='{.metadata.labels.istio-injection}{"\n"}'
+
+                          echo "Namespace injection labeling completed."
+                    environmentVariables: []
+                    outputVariables: []

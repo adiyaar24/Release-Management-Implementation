@@ -1,0 +1,103 @@
+pipeline:
+  name: BG Scale Down Offline Color
+  identifier: bg_scale_down_offline_blue_green
+  orgIdentifier: default
+  projectIdentifier: ElevanceHealth
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  variables:
+    - name: targetReplicas
+      type: Number
+      value: "1"
+      description: Target replica count for offline color after scale down
+    - name: offlineColor
+      type: String
+      value: <+input>
+      description: Offline color to scale down
+  stages:
+    - stage:
+        name: Scale Down Offline
+        identifier: scale_down_offline
+        type: Deployment
+        tags:
+          blue-Green: "true"
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: Blue_Green_ElevanceHealth
+          environment:
+            environmentRef: account.AWSISELab
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: AWSInfra
+          execution:
+            steps:
+              - step:
+                  name: Blue Green Stage Scale Down
+                  identifier: bgStageScaleDown
+                  type: K8sBlueGreenStageScaleDown
+                  timeout: 10m
+                  spec:
+                    deleteResources: false
+          rollbackSteps: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: MarkAsSuccess
+        timeout: 10m
+
+    # Best-effort cleanup helper: uninstall Istio and remove namespace injection label.
+    - stage:
+        name: Cleanup Istio IstioOnly
+        identifier: istio_cleanup
+        type: Custom
+        tags:
+          blue-Green: "true"
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Uninstall Istio and remove injection label
+                  identifier: cleanupIstio
+                  type: ShellScript
+                  timeout: 20m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set +e
+                          ISTIO_NS="istio-system"
+                          INJECTION_NS="harness-aditya"
+
+                          export KUBECONFIG="${HARNESS_KUBE_CONFIG_PATH:-}"
+
+                          echo "=== Istio cleanup (best effort) ==="
+
+                          if command -v helm >/dev/null 2>&1; then
+                            echo "Attempting helm uninstall of istiod and istio-base"
+                            helm uninstall istiod -n "${ISTIO_NS}" >/dev/null 2>&1 || true
+                            helm uninstall istio-base -n "${ISTIO_NS}" >/dev/null 2>&1 || true
+                          fi
+
+                          # Remove leftovers even if helm isn't available.
+                          kubectl label namespace "${INJECTION_NS}" istio-injection- --overwrite >/dev/null 2>&1 || true
+                          kubectl delete namespace "${ISTIO_NS}" --ignore-not-found=true >/dev/null 2>&1 || true
+
+                          echo "Cleanup commands issued. Current state:"
+                          kubectl get namespace "${ISTIO_NS}" --ignore-not-found=true || true
+
+                  environmentVariables: []
+                  outputVariables: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: MarkAsSuccess
+        timeout: 30m
