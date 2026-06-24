@@ -1,0 +1,12 @@
+activity:
+  id: eh_bg_activity_qa_signoff
+  name: QA Sign-off
+  description: QA validates new online color after route change (Sat-Sun window)
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  manual:
+    inputs:
+      - name: qaApproved
+        type: Boolean
+        required: true

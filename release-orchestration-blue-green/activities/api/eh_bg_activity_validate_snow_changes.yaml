@@ -1,0 +1,9 @@
+activity:
+  id: eh_bg_activity_validate_snow_changes
+  name: Validate Linked Change Tickets
+  description: Demo shell-script pipeline validates offline/online ServiceNow change tickets
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  pipeline:
+    pipeline: default/ElevanceHealth/bg_validate_snow_change_tickets

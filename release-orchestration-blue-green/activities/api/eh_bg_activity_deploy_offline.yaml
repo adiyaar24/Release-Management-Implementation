@@ -1,0 +1,9 @@
+activity:
+  id: eh_bg_activity_deploy_offline
+  name: Deploy to Offline Color
+  description: Deploy to offline color using GuestBook stub against AWS ISE Lab
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  pipeline:
+    pipeline: default/ElevanceHealth/bg_deploy_offline_blue_green

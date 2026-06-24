@@ -1,0 +1,9 @@
+activity:
+  id: eh_bg_activity_scale_down
+  name: Scale Down Offline Environment
+  description: Reduce offline color replica count for cost optimization
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  pipeline:
+    pipeline: default/ElevanceHealth/bg_scale_down_offline_blue_green

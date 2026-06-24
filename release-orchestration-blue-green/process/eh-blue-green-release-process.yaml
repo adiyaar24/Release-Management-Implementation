@@ -1,0 +1,124 @@
+process:
+  name: Elevance Health Blue Green Release Process
+  description: Weekly blue-green release aligned to offline/online ServiceNow change windows — prod-blue/green and dr-blue/green pattern
+  id: eh_bg_release_management_process
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  inputs:
+    - name: releaseVersion
+      type: String
+      description: Application version or artifact tag to deploy
+      required: true
+    - name: offlineChangeTicket
+      type: String
+      description: ServiceNow offline change ticket (Mon-Fri deploy window)
+      required: true
+    - name: onlineChangeTicket
+      type: String
+      description: ServiceNow online change ticket (post route-change window)
+      required: true
+    - name: offlineColor
+      type: String
+      description: Offline deployment color (blue or green) for app-level blue/green
+      required: true
+      default: blue
+    - name: onlineColor
+      type: String
+      description: Current online color (blue or green) before the route swap
+      required: true
+      default: green
+  phases:
+    - phase:
+        id: planning_phase
+        name: Planning and Change Management
+        description: Validate linked offline/online change tickets before any deploy
+        owners:
+          - All Account Users
+        depends-on: []
+        tags:
+          blue-Green: "true"
+        activities:
+          - activity: eh_bg_activity_validate_snow_changes
+            id: validate_change_tickets
+            name: Validate Linked Change Tickets
+            depends-on: []
+
+    - phase:
+        id: offline_deploy_phase
+        name: Offline Color Deployment
+        description: App teams deploy to offline color Mon-Fri using offline change ticket
+        owners:
+          - All Account Users
+        depends-on:
+          - planning_phase
+        tags:
+          blue-Green: "true"
+        activities:
+          - activity: eh_bg_activity_deploy_offline
+            id: deploy_offline_color
+            name: Deploy to Offline Color
+            depends-on: []
+
+    - phase:
+        id: route_change_phase
+        name: Route Change
+        description: Friday 9 PM route flip — scale up stage, approve, then native `K8sBGSwapServices` swap online/offline
+        owners:
+          - All Account Users
+        depends-on:
+          - offline_deploy_phase
+        tags:
+          blue-Green: "true"
+        activities:
+          - activity: eh_bg_activity_pre_route_approval
+            id: pre_route_change_approval
+            name: Pre Route Change Approval
+            depends-on: []
+          - activity: eh_bg_activity_route_change
+            id: route_change_swap
+            name: Route Change Traffic Swap
+            depends-on:
+              - pre_route_change_approval
+
+    - phase:
+        id: validation_phase
+        name: QA and Operations Validation
+        description: Post route-change QA (Sat-Sun) and Ops monitoring (Mon)
+        owners:
+          - All Account Users
+        depends-on:
+          - route_change_phase
+        tags:
+          blue-Green: "true"
+        activities:
+          - activity: eh_bg_activity_qa_signoff
+            id: qa_signoff
+            name: QA Sign-off
+            depends-on: []
+          - activity: eh_bg_activity_ops_signoff
+            id: ops_monitoring_signoff
+            name: Operations Monitoring Sign-off
+            depends-on:
+              - qa_signoff
+
+    - phase:
+        id: sync_cleanup_phase
+        name: Sync and Cost Optimization
+        description: Sync deploy to new offline color using online ticket; scale down old offline
+        owners:
+          - All Account Users
+        depends-on:
+          - validation_phase
+        tags:
+          blue-Green: "true"
+        activities:
+          - activity: eh_bg_activity_deploy_offline
+            id: sync_offline_deploy
+            name: Sync Deploy to New Offline Color
+            depends-on: []
+          - activity: eh_bg_activity_scale_down
+            id: scale_down_offline
+            name: Scale Down Offline Environment
+            depends-on:
+              - sync_offline_deploy

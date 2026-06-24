@@ -1,0 +1,18 @@
+releaseGroup:
+  name: Elevance Health Weekly Blue Green Release Train
+  description: Recurring weekly blue-green cadence with Friday 9 PM route change
+  processId: eh_bg_release_management_process
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  cadence:
+    type: weekly
+    dayOfWeek: monday
+    time: "09:00"
+    timezone: UTC
+  notes: |
+    Offline change window: Monday 00:00 - Friday 21:00 UTC
+    Route change: Friday 21:00 UTC
+    Online change window: Friday 21:01 - following Thursday 21:00 UTC
+    QA validation: Saturday-Sunday after route change
+    Ops monitoring: Monday after route change

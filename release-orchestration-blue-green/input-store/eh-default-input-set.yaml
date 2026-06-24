@@ -1,0 +1,58 @@
+id: eh_bg_default_input_set
+name: Elevance Health Blue Green Default Input Set
+description: Default inputs for weekly blue-green release — maps process inputs to CD pipeline runtime inputs
+tags:
+  blue-Green: "true"
+  customer: ElevanceHealth
+global:
+  releaseVersion: <+input>
+  offlineChangeTicket: <+input>
+  onlineChangeTicket: <+input>
+  offlineColor: <+input>
+  onlineColor: <+input>
+  targetEnvironment: account.AWSISELab
+  targetInfrastructure: AWSInfra
+  targetService: account.GuestBook_Service
+  targetNamespace: harness-aditya
+phases:
+  - id: planning_phase
+    activities:
+      - id: validate_change_tickets
+        with:
+          pipeline: default/ElevanceHealth/bg_validate_snow_change_tickets
+          inputs:
+            offlineChangeTicket: <+process.offlineChangeTicket>
+            onlineChangeTicket: <+process.onlineChangeTicket>
+  - id: offline_deploy_phase
+    activities:
+      - id: deploy_offline_color
+        with:
+          pipeline: default/ElevanceHealth/bg_deploy_offline_blue_green
+          inputs:
+            releaseVersion: <+process.releaseVersion>
+            changeTicket: <+process.offlineChangeTicket>
+            offlineColor: <+process.offlineColor>
+  - id: route_change_phase
+    activities:
+      - id: route_change_swap
+        with:
+          pipeline: default/ElevanceHealth/bg_route_change_blue_green
+          inputs:
+            changeTicket: <+process.onlineChangeTicket>
+            fromColor: <+process.onlineColor>
+            toColor: <+process.offlineColor>
+  - id: sync_cleanup_phase
+    activities:
+      - id: sync_offline_deploy
+        with:
+          pipeline: default/ElevanceHealth/bg_deploy_offline_blue_green
+          inputs:
+            releaseVersion: <+process.releaseVersion>
+            changeTicket: <+process.onlineChangeTicket>
+            offlineColor: <+process.onlineColor>
+      - id: scale_down_offline
+        with:
+          pipeline: default/ElevanceHealth/bg_scale_down_offline_blue_green
+          inputs:
+            targetReplicas: 1
+            offlineColor: <+process.offlineColor>

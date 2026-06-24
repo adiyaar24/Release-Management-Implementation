@@ -1,0 +1,9 @@
+activity:
+  id: eh_bg_activity_route_change
+  name: Route Change Traffic Swap
+  description: Friday route flip — approve, then native blue/green swap using `K8sBGSwapServices`
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  pipeline:
+    pipeline: default/ElevanceHealth/bg_route_change_blue_green

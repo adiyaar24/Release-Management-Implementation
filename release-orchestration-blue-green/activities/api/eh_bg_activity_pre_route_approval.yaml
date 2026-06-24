@@ -1,0 +1,12 @@
+activity:
+  id: eh_bg_activity_pre_route_approval
+  name: Pre Route Change Approval
+  description: Release Manager approves Friday 9 PM route change execution
+  tags:
+    blue-Green: "true"
+    customer: ElevanceHealth
+  manual:
+    inputs:
+      - name: routeChangeApproved
+        type: Boolean
+        required: true
