@@ -75,14 +75,14 @@ def sanitize_repo_url_for_output(repo_url: str) -> str:
 
 
 def append_comment_line(text: str, comment_line: str) -> str:
-    """Append exactly one marker line at the bottom (YAML # comment)."""
+    """Always append one marker line at the bottom (even if the same marker is already present)."""
     if text and not text.endswith("\n"):
         text += "\n"
     return text + comment_line.strip() + "\n"
 
 
 def strip_marker_lines(text: str, marker_line: str) -> str:
-    """Remove any existing marker lines to keep diffs idempotent-ish."""
+    """Remove marker lines before YAML parse/update only (not used before write)."""
     m = marker_line.strip()
     lines = text.splitlines()
     kept = [ln for ln in lines if ln.strip() != m]
@@ -360,7 +360,10 @@ def discover_yaml_files(root: Path, relative_dir: str) -> List[Path]:
 def git_add_path(repo_path: Path, rel: str, force: bool = False) -> None:
     """Stage a path; use -f when .gitignore would otherwise exclude input sets."""
     args = ["add", "-f", rel] if force else ["add", rel]
-    run_git(args, repo_path)
+    proc = run_git(args, repo_path, check=False)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise PluginError(f"git add failed for {rel}: {err}")
 
 
 def list_ignored_paths(repo_path: Path, rel_paths: List[str]) -> List[str]:
@@ -719,26 +722,27 @@ def main() -> int:
             rel_paths.append(rel)
             stems.append(manifest_key_for(ypath))
             raw = ypath.read_text(encoding="utf-8")
-            raw = strip_marker_lines(raw, str(cfg["comment_line"]))
-            updated_text = raw
+            marker = str(cfg["comment_line"])
+            parse_source = strip_marker_lines(raw, marker)
+            yaml_updated = False
+            updated_text = parse_source
             try:
-                yaml_obj = yaml.safe_load(raw)
+                yaml_obj = yaml.safe_load(parse_source)
                 if yaml_obj and update_input_set_yaml_values(yaml_obj, rel, cfg):
                     updated_text = yaml.safe_dump(
                         yaml_obj,
                         sort_keys=False,
                         default_flow_style=False,
                     )
+                    yaml_updated = True
             except Exception:
                 logger.warning(
                     "Failed YAML parse/update for %s (keeping original content)",
                     rel,
                     exc_info=True,
                 )
-            ypath.write_text(
-                append_comment_line(updated_text, str(cfg["comment_line"])),
-                encoding="utf-8",
-            )
+            body = updated_text if yaml_updated else raw
+            ypath.write_text(append_comment_line(body, marker), encoding="utf-8")
 
         if mode == "blue-green":
             offline_entries, online_entries = discover_blue_green_service_entries(
@@ -780,7 +784,6 @@ def main() -> int:
                 ", ".join(ignored),
             )
 
-        # Force-add harness tree so input sets are included even when .gitignore matches .harness/
         git_add_path(repo_path, harness_rel, force=True)
         for rel in rel_paths:
             git_add_path(repo_path, rel, force=True)
@@ -792,15 +795,6 @@ def main() -> int:
             ln.strip() for ln in (staged_proc.stdout or "").splitlines() if ln.strip()
         ]
         logger.info("Staged %d file(s) for commit", len(staged_files))
-        for s in staged_files:
-            logger.info("  staged: %s", s)
-
-        missing_staged = [r for r in rel_paths if r not in staged_files]
-        if missing_staged:
-            raise PluginError(
-                "Input set files were modified but not staged (check permissions/.gitignore): "
-                + ", ".join(missing_staged)
-            )
 
         msg = f"{cfg['ticket']}: marker comments on input sets + {', '.join(manifest_paths)}"
         run_git(["commit", "-m", msg], repo_path)

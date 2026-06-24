@@ -74,7 +74,7 @@ Service discovery scans `PLUGIN_HARNESS_PATH` recursively:
 
 Use **`PLUGIN_SERVICE_BASES`** (comma-separated, e.g. `nginx,alpine`) to limit which microservices are included.
 
-Default marker comment (override with `PLUGIN_CHANGE_COMMENT_LINE`):
+Default marker comment (override with `PLUGIN_CHANGE_COMMENT_LINE`). The plugin **always appends** one marker line at the bottom of each input set YAML. If a marker is already present, another is added **below** it so the PR shows a diff. Remove extra marker lines manually after review/merge.
 
 ```text
 # Remove this comment post your chnges are done , this was created as part of auto creation of PR for easier view
