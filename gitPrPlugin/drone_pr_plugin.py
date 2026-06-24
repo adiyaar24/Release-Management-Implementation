@@ -92,11 +92,12 @@ def strip_marker_lines(text: str, marker_line: str) -> str:
 
 def update_input_set_yaml_values(yaml_obj: Any, rel_path: str, cfg: Dict[str, Any]) -> bool:
     """
-    Update Harness InputSet YAML values based on file location.
+    Update Harness InputSet YAML values based on file path and filename.
 
     Conventions:
-    - offline/*: set changeTicket and offlineColor (+ releaseVersion if provided)
-    - route-change/*: set changeTicket, fromColor, toColor
+    - offline/* or *_{offlineColor} or *_dr_{offlineColor}: offline ticket + offlineColor
+    - route-change/* or *_route_change or *_{onlineColor}: online ticket + fromColor/toColor
+    - flat input_sets/ folders: classify by filename suffix
     """
     if not isinstance(yaml_obj, dict):
         return False
@@ -113,20 +114,38 @@ def update_input_set_yaml_values(yaml_obj: Any, rel_path: str, cfg: Dict[str, An
     if not isinstance(variables, list):
         return False
 
-    rel_norm = rel_path.replace("\\", "/")
-    is_offline = "/offline/" in rel_norm or rel_norm.endswith("/offline")
+    rel_norm = rel_path.replace("\\", "/").lower()
+    stem_lower = Path(rel_path).stem.lower()
+    offline_color = str(cfg["offline_color"]).lower()
+    online_color = str(cfg["online_color"]).lower()
+
+    is_offline = (
+        "/offline/" in rel_norm
+        or rel_norm.endswith("/offline")
+        or stem_lower.endswith(f"_{offline_color}")
+        or stem_lower.endswith(f"_dr_{offline_color}")
+        or "_offline" in stem_lower
+    )
     is_route = (
         "/route-change/" in rel_norm
         or "/route_change/" in rel_norm
         or "/route-change" in rel_norm
+        or "_route_change" in stem_lower
+        or stem_lower.endswith(f"_{online_color}")
+        or stem_lower.endswith(f"_dr_{online_color}")
     )
+
+    if is_offline and is_route:
+        # Prefer explicit route-change naming when both patterns match.
+        if "_route_change" in stem_lower or "route-change" in rel_norm or "route_change" in rel_norm:
+            is_offline = False
+        else:
+            is_route = False
 
     if not is_offline and not is_route:
         return False
 
     change_ticket_value = cfg["ticket"] if is_offline else cfg.get("online_ticket") or cfg["ticket"]
-    offline_color = cfg["offline_color"]
-    online_color = cfg["online_color"]
     release_version = cfg.get("release_version") or ""
 
     updated = False
@@ -138,13 +157,13 @@ def update_input_set_yaml_values(yaml_obj: Any, rel_path: str, cfg: Dict[str, An
             v["value"] = str(change_ticket_value)
             updated = True
         elif name == "offlineColor" and is_offline:
-            v["value"] = str(offline_color)
+            v["value"] = str(cfg["offline_color"])
             updated = True
         elif name == "fromColor" and is_route:
-            v["value"] = str(online_color)
+            v["value"] = str(cfg["online_color"])
             updated = True
         elif name == "toColor" and is_route:
-            v["value"] = str(offline_color)
+            v["value"] = str(cfg["offline_color"])
             updated = True
         elif name == "releaseVersion" and release_version:
             v["value"] = str(release_version)
@@ -324,12 +343,33 @@ def discover_blue_green_service_entries(
 def discover_yaml_files(root: Path, relative_dir: str) -> List[Path]:
     base = root / relative_dir.strip("/ ")
     if not base.is_dir():
-        raise PluginError(f"Harness path is not a directory: {relative_dir}")
+        raise PluginError(
+            f"Harness path is not a directory: {relative_dir} "
+            f"(resolved: {base}). Check PLUGIN_HARNESS_PATH."
+        )
     files: List[Path] = []
     for p in sorted(base.rglob("*")):
         if p.is_file() and p.suffix.lower() in (".yaml", ".yml"):
             files.append(p)
+    logger.info("Discovered %d YAML file(s) under %s", len(files), relative_dir)
+    for p in files:
+        logger.info("  - %s", p.relative_to(root).as_posix())
     return files
+
+
+def git_add_path(repo_path: Path, rel: str, force: bool = False) -> None:
+    """Stage a path; use -f when .gitignore would otherwise exclude input sets."""
+    args = ["add", "-f", rel] if force else ["add", rel]
+    run_git(args, repo_path)
+
+
+def list_ignored_paths(repo_path: Path, rel_paths: List[str]) -> List[str]:
+    ignored: List[str] = []
+    for rel in rel_paths:
+        proc = run_git(["check-ignore", "-q", rel], repo_path, check=False)
+        if proc.returncode == 0:
+            ignored.append(rel)
+    return ignored
 
 
 def parse_github_repo(repo_url: str) -> Tuple[str, str]:
@@ -681,21 +721,20 @@ def main() -> int:
             raw = ypath.read_text(encoding="utf-8")
             raw = strip_marker_lines(raw, str(cfg["comment_line"]))
             updated_text = raw
-            if mode == "blue-green":
-                try:
-                    yaml_obj = yaml.safe_load(raw)
-                    if update_input_set_yaml_values(yaml_obj, rel, cfg):
-                        updated_text = yaml.safe_dump(
-                            yaml_obj,
-                            sort_keys=False,
-                            default_flow_style=False,
-                        )
-                except Exception:
-                    logger.warning(
-                        "Failed YAML parse/update for %s (keeping original content)",
-                        rel,
-                        exc_info=True,
+            try:
+                yaml_obj = yaml.safe_load(raw)
+                if yaml_obj and update_input_set_yaml_values(yaml_obj, rel, cfg):
+                    updated_text = yaml.safe_dump(
+                        yaml_obj,
+                        sort_keys=False,
+                        default_flow_style=False,
                     )
+            except Exception:
+                logger.warning(
+                    "Failed YAML parse/update for %s (keeping original content)",
+                    rel,
+                    exc_info=True,
+                )
             ypath.write_text(
                 append_comment_line(updated_text, str(cfg["comment_line"])),
                 encoding="utf-8",
@@ -732,10 +771,36 @@ def main() -> int:
             manifest_services = stems
             (repo_path / manifest_name).write_text(manifest_yaml, encoding="utf-8")
 
+        harness_rel = str(cfg["harness_path"]).strip().strip("/")
+        ignored = list_ignored_paths(repo_path, rel_paths)
+        if ignored:
+            logger.warning(
+                "%d input set file(s) are listed in .gitignore and need force-add: %s",
+                len(ignored),
+                ", ".join(ignored),
+            )
+
+        # Force-add harness tree so input sets are included even when .gitignore matches .harness/
+        git_add_path(repo_path, harness_rel, force=True)
         for rel in rel_paths:
-            run_git(["add", rel], repo_path)
+            git_add_path(repo_path, rel, force=True)
         for manifest_rel in manifest_paths:
-            run_git(["add", manifest_rel], repo_path)
+            git_add_path(repo_path, manifest_rel, force=False)
+
+        staged_proc = run_git(["diff", "--cached", "--name-only"], repo_path, check=False)
+        staged_files = [
+            ln.strip() for ln in (staged_proc.stdout or "").splitlines() if ln.strip()
+        ]
+        logger.info("Staged %d file(s) for commit", len(staged_files))
+        for s in staged_files:
+            logger.info("  staged: %s", s)
+
+        missing_staged = [r for r in rel_paths if r not in staged_files]
+        if missing_staged:
+            raise PluginError(
+                "Input set files were modified but not staged (check permissions/.gitignore): "
+                + ", ".join(missing_staged)
+            )
 
         msg = f"{cfg['ticket']}: marker comments on input sets + {', '.join(manifest_paths)}"
         run_git(["commit", "-m", msg], repo_path)
@@ -818,6 +883,9 @@ def main() -> int:
                 "online_color": str(cfg["online_color"]),
                 "manifest_services": json.dumps(manifest_services),
                 "release_manifest_yaml_json": json.dumps(manifest_yaml),
+                "harness_path": str(cfg["harness_path"]),
+                "input_set_file_count": str(len(rel_paths)),
+                "staged_files": json.dumps(staged_files),
             }
         )
         logger.info("Done: %d branch(es), PR backend=%s, mode=%s", len(pushed_branches), backend, mode)

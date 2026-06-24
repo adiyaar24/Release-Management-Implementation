@@ -120,7 +120,7 @@ Default marker comment (override with `PLUGIN_CHANGE_COMMENT_LINE`):
 |----------|---------|-------------|
 | `PLUGIN_GIT_USERNAME` | *(empty)* | HTTPS username; used with `PLUGIN_GIT_TOKEN`. |
 | `PLUGIN_GIT_TOKEN` | *(empty)* | Password / PAT for HTTPS clone and push. |
-| `PLUGIN_HARNESS_PATH` | `.harness` | Directory under repo root to scan (recursive). |
+| `PLUGIN_HARNESS_PATH` | `.harness` | Directory under repo root to scan (recursive). Use full path to your input sets folder, e.g. `.harness/orgs/default/projects/BlueGreen/pipelines/Release_PipelineBG/input_sets`. |
 | `PLUGIN_BASE_BRANCH` | `main` | PR target / branch fork point. |
 | `PLUGIN_BRANCH_PREFIX` | `release` | Branch prefix. |
 | `PLUGIN_WORK_DIR` | `/harness` | Parent directory for the clone. |
@@ -242,7 +242,6 @@ Blue-green manifests use the same **`services.<name>: true|false`** toggle model
 ## What to verify
 
 - Branch exists: `release/<ticket>`.
-- **Standard:** root file `release-manifest-<ticket>.yaml` lists all input sets in scope.
-- **Blue-green:** folder `release-<ticket>/` with `offline-<color>-services.yml` and `online-<color>-services.yml`.
-- Each input set YAML ends with the marker comment line.
-- **One** PR exists in Harness Code / GitHub for the branch into `main`.
+- **PR includes input set YAML files** under `PLUGIN_HARNESS_PATH` (marker comment appended), not only `release-<ticket>/` manifests.
+- If input sets are missing from the PR, check `.gitignore` — the plugin uses `git add -f` for the harness path (v1.1+).
+- Plugin logs list every discovered YAML and every staged file before commit.
